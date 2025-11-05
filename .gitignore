@@ -1,0 +1,36 @@
+# Compiled Python files
+*.pyc
+__pycache__/
+
+# Virtual environment
+venv/
+env/
+
+# Environment variables
+.env
+
+# Local settings
+local_settings.py
+
+# SQLite database
+db.sqlite3
+
+# Log files
+*.log
+
+# Portable Object Template files
+*.pot
+
+# Collected static files
+/static/
+
+# User-uploaded media files
+/media/
+
+# macOS files
+.DS_Store
+
+# Editor backup files
+*~
+BRIDGE_CONFIGURATION.md
+LOCAL_TESTING.md
