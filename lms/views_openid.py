@@ -48,10 +48,19 @@ def authorize(request):
             # Try to decode unique_id from state (if we passed it)
             try:
                 from urllib.parse import unquote
-                potential_unique_id = unquote(state)
-                # Check if it looks like an email or unique_id
-                if '@' in potential_unique_id or len(potential_unique_id) > 10:
-                    account = OHSAccount.objects.filter(unique_id=potential_unique_id).first()
+                decoded_state = unquote(state)
+                
+                # Check if state contains unique_id in format: /learner/courses|unique_id
+                if '|' in decoded_state:
+                    parts = decoded_state.split('|', 1)
+                    if len(parts) == 2:
+                        potential_unique_id = parts[1]
+                        account = OHSAccount.objects.filter(unique_id=potential_unique_id).first()
+                        if account:
+                            unique_id = account.unique_id
+                # Otherwise, check if it looks like an email or unique_id
+                elif '@' in decoded_state or len(decoded_state) > 10:
+                    account = OHSAccount.objects.filter(unique_id=decoded_state).first()
                     if account:
                         unique_id = account.unique_id
             except:
@@ -89,7 +98,65 @@ def authorize(request):
         # Logout user from Django (security best practice)
         auth_logout(request)
         
-        # Redirect back to Bridge with authorization code
+        # Check if state parameter contains a path (like /learner/courses)
+        # We need to redirect to Bridge's redirect_uri so Bridge can process the code
+        # But then immediately redirect to courses to avoid the error page
+        from urllib.parse import unquote
+        decoded_state = unquote(state) if state else ''
+        
+        # Extract path from state if it's in format: /learner/courses|unique_id
+        state_path = decoded_state
+        if '|' in decoded_state:
+            state_path = decoded_state.split('|', 1)[0]
+        
+        # If state looks like a path (starts with /), use iframe to process code, then redirect to courses
+        if state_path.startswith('/') and account.bridge_subaccount_id:
+            # Extract subdomain from redirect_uri (more reliable than bridge_subaccount_id)
+            import re
+            subdomain_match = re.search(r'https://([^\.]+)\.bridgeapp\.com', redirect_uri)
+            if subdomain_match:
+                extracted_subdomain = subdomain_match.group(1)
+                # Add -safetynow suffix if not present
+                if '-safetynow' not in extracted_subdomain:
+                    bridge_subdomain = f"{extracted_subdomain}-safetynow"
+                else:
+                    bridge_subdomain = extracted_subdomain
+            else:
+                bridge_subdomain = account.bridge_subaccount_id
+            
+            bridge_courses_url = f"https://{bridge_subdomain}.bridgeapp.com{state_path}"
+            redirect_uri_with_code = f'{redirect_uri}?{urllib.parse.urlencode({"code": code, "state": state})}'
+            
+            # Create HTML page that opens redirect_uri in hidden iframe (so Bridge processes code)
+            # Then immediately redirects main window to courses page
+            html_content = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Logging into Bridge...</title>
+                <style>
+                    body {{
+                        font-family: Arial, sans-serif;
+                        text-align: center;
+                        padding: 50px;
+                    }}
+                </style>
+            </head>
+            <body>
+                <h2>Logging you into Bridge...</h2>
+                <p>Please wait...</p>
+                <iframe id="bridgeFrame" style="display:none;" src="{redirect_uri_with_code}"></iframe>
+                <script>
+                    // Redirect to courses immediately - Bridge will process code in iframe
+                    window.location.href = "{bridge_courses_url}";
+                </script>
+            </body>
+            </html>
+            """
+            from django.http import HttpResponse
+            return HttpResponse(html_content)
+        
+        # Fallback: redirect to Bridge's redirect_uri (standard OIDC flow)
         return HttpResponseRedirect(
             f'{redirect_uri}?{urllib.parse.urlencode({"code": code, "state": state})}'
         )

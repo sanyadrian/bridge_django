@@ -193,11 +193,12 @@ def authenticate_user(request, unique_id):
         # Build Bridge subaccount URL
         bridge_subdomain = account.bridge_subaccount_id
         
-        # Redirect to Bridge login page - Bridge should detect external auth configured
-        # and redirect to our OIDC authorize endpoint
-        # Pass unique_id in state parameter so we can retrieve it if session doesn't persist
-        encoded_unique_id = quote(account.unique_id)
-        bridge_url = f"https://{bridge_subdomain}.bridgeapp.com/login?state={encoded_unique_id}"
+        # Redirect directly to Bridge learner courses page
+        # Bridge will detect external auth configured and trigger OIDC flow automatically
+        # This bypasses the /login endpoint which has 503 issues
+        # We rely on session data (ohs_account_id, ohs_unique_id) stored above
+        # The session should persist across the redirect to Bridge
+        bridge_url = f"https://{bridge_subdomain}.bridgeapp.com/learner/courses"
         
         return HttpResponseRedirect(bridge_url)
         
