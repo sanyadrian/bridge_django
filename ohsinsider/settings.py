@@ -23,6 +23,15 @@ NGROK_DOMAIN = os.environ.get('NGROK_DOMAIN')
 if NGROK_DOMAIN:
     ALLOWED_HOSTS.append(NGROK_DOMAIN)
 
+# In development, allow any ngrok domain automatically
+if DEBUG:
+    # Allow common ngrok domain patterns
+    ALLOWED_HOSTS.extend([
+        '.ngrok-free.dev',
+        '.ngrok.io',
+        '.ngrok.app',
+    ])
+
 # Trust public tunnel domain for CSRF (Django 4+ requires scheme)
 CSRF_TRUSTED_ORIGINS = [
     'http://localhost',
@@ -30,6 +39,14 @@ CSRF_TRUSTED_ORIGINS = [
 ]
 if NGROK_DOMAIN:
     CSRF_TRUSTED_ORIGINS.append(f'https://{NGROK_DOMAIN}')
+
+# In development, trust any ngrok domain for CSRF
+if DEBUG:
+    CSRF_TRUSTED_ORIGINS.extend([
+        'https://*.ngrok-free.dev',
+        'https://*.ngrok.io',
+        'https://*.ngrok.app',
+    ])
 
 # Application definition
 INSTALLED_APPS = [
