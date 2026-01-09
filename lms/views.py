@@ -191,7 +191,10 @@ def authenticate_user(request, unique_id):
         request.session.save()  # Ensure session is saved
         
         # Build Bridge subaccount URL
+        # All Bridge subaccounts follow the pattern: name-safetynow.bridgeapp.com
         bridge_subdomain = account.bridge_subaccount_id
+        if '-safetynow' not in bridge_subdomain:
+            bridge_subdomain = f"{bridge_subdomain}-safetynow"
         
         # Redirect directly to Bridge learner courses page
         # Bridge will detect external auth configured and trigger OIDC flow automatically

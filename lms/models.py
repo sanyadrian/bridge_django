@@ -18,7 +18,12 @@ class OHSAccount(models.Model):
     )
     bridge_subaccount_id = models.CharField(
         max_length=100,
-        help_text="Bridge LMS subaccount identifier"
+        help_text="Bridge LMS subaccount identifier (subdomain)"
+    )
+    company_name = models.CharField(
+        max_length=200,
+        blank=True,
+        help_text="Company name for subaccount creation"
     )
     user_email = models.EmailField()
     first_name = models.CharField(max_length=100)

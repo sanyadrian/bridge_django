@@ -109,52 +109,55 @@ def authorize(request):
         if '|' in decoded_state:
             state_path = decoded_state.split('|', 1)[0]
         
-        # If state looks like a path (starts with /), use iframe to process code, then redirect to courses
+        # If state looks like a path (starts with /), redirect to courses after OAuth
         if state_path.startswith('/') and account.bridge_subaccount_id:
-            # Extract subdomain from redirect_uri (more reliable than bridge_subaccount_id)
-            import re
-            subdomain_match = re.search(r'https://([^\.]+)\.bridgeapp\.com', redirect_uri)
-            if subdomain_match:
-                extracted_subdomain = subdomain_match.group(1)
-                # Add -safetynow suffix if not present
-                if '-safetynow' not in extracted_subdomain:
-                    bridge_subdomain = f"{extracted_subdomain}-safetynow"
-                else:
-                    bridge_subdomain = extracted_subdomain
-            else:
-                bridge_subdomain = account.bridge_subaccount_id
+            # Use the account's bridge_subaccount_id and ensure -safetynow suffix
+            bridge_subdomain = account.bridge_subaccount_id
+            if '-safetynow' not in bridge_subdomain:
+                bridge_subdomain = f"{bridge_subdomain}-safetynow"
             
             bridge_courses_url = f"https://{bridge_subdomain}.bridgeapp.com{state_path}"
-            redirect_uri_with_code = f'{redirect_uri}?{urllib.parse.urlencode({"code": code, "state": state})}'
             
-            # Create HTML page that opens redirect_uri in hidden iframe (so Bridge processes code)
-            # Then immediately redirects main window to courses page
-            html_content = f"""
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <title>Logging into Bridge...</title>
-                <style>
-                    body {{
-                        font-family: Arial, sans-serif;
-                        text-align: center;
-                        padding: 50px;
-                    }}
-                </style>
-            </head>
-            <body>
-                <h2>Logging you into Bridge...</h2>
-                <p>Please wait...</p>
-                <iframe id="bridgeFrame" style="display:none;" src="{redirect_uri_with_code}"></iframe>
-                <script>
-                    // Redirect to courses immediately - Bridge will process code in iframe
-                    window.location.href = "{bridge_courses_url}";
-                </script>
-            </body>
-            </html>
-            """
-            from django.http import HttpResponse
-            return HttpResponse(html_content)
+            # If redirect_uri is Bridge's central callback (auth.bridgeapp.com), 
+            # we need to redirect there with the code, then Bridge will handle the rest
+            # Otherwise, redirect directly to the redirect_uri
+            if 'auth.bridgeapp.com/oauth2/callback' in redirect_uri:
+                # Bridge's central callback - redirect there with code, Bridge will handle redirect to subaccount
+                redirect_uri_with_code = f'{redirect_uri}?{urllib.parse.urlencode({"code": code, "state": state})}'
+                
+                # Create HTML page that processes OAuth callback in iframe, then redirects to courses
+                html_content = f"""
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <title>Logging into Bridge...</title>
+                    <style>
+                        body {{
+                            font-family: Arial, sans-serif;
+                            text-align: center;
+                            padding: 50px;
+                        }}
+                    </style>
+                </head>
+                <body>
+                    <h2>Logging you into Bridge...</h2>
+                    <p>Please wait...</p>
+                    <iframe id="bridgeFrame" style="display:none;" src="{redirect_uri_with_code}"></iframe>
+                    <script>
+                        // Wait a moment for Bridge to process the code, then redirect to courses
+                        setTimeout(function() {{
+                            window.location.href = "{bridge_courses_url}";
+                        }}, 1000);
+                    </script>
+                </body>
+                </html>
+                """
+                from django.http import HttpResponse
+                return HttpResponse(html_content)
+            else:
+                # Subaccount-specific redirect_uri - redirect there with code
+                redirect_uri_with_code = f'{redirect_uri}?{urllib.parse.urlencode({"code": code, "state": state})}'
+                return HttpResponseRedirect(redirect_uri_with_code)
         
         # Fallback: redirect to Bridge's redirect_uri (standard OIDC flow)
         return HttpResponseRedirect(

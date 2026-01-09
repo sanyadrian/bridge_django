@@ -4,6 +4,7 @@ Django settings for OHS Insider Bridge integration.
 
 import os
 from pathlib import Path
+from decouple import config, Csv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -128,8 +129,13 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # OHS Insider specific settings
 OHS_BRIDGE_BASE_URL = 'https://safetynow.bridgeapp.com'
-OHS_BRIDGE_API_KEY = 'your-bridge-api-key'
-OHS_BRIDGE_API_SECRET = 'your-bridge-api-secret'
+
+# Bridge API credentials for creating subaccounts and users
+# Get these from Bridge LMS admin: Settings → API or Developer Settings
+# These are DIFFERENT from the OAuth Client ID/Secret in OHSAuth model
+# Load from .env file or environment variables
+OHS_BRIDGE_API_KEY = config('BRIDGE_API_KEY', default='your-bridge-api-key-here')
+OHS_BRIDGE_API_SECRET = config('BRIDGE_API_SECRET', default='your-bridge-api-secret-here')
 
 # Redis configuration for background tasks
 REDIS = {
