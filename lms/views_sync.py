@@ -118,6 +118,7 @@ def sync_user_to_bridge(request):
         last_name = data.get('last_name', '')
         company_name = data.get('company_name', '')
         provision_id = data.get('provision_id', '')
+        prefix = data.get('prefix', 'ohsi')  # Default to 'ohsi' if not provided
         
         if not email:
             return JsonResponse({'error': 'Missing required field: email'}, status=400)
@@ -141,8 +142,8 @@ def sync_user_to_bridge(request):
                     'error': 'Company name required for new subaccount creation'
                 }, status=400)
             
-            # Generate subaccount subdomain from company name
-            bridge_subaccount_id = generate_subaccount_domain(company_name)
+            # Generate subaccount subdomain from company name with prefix
+            bridge_subaccount_id = generate_subaccount_domain(company_name, prefix=prefix, root_subdomain='safetynow')
         
         # Check if subaccount exists in Bridge, create if not
         subaccount = None
@@ -158,9 +159,11 @@ def sync_user_to_bridge(request):
                     }, status=400)
                 
                 try:
+                    # Create subaccount name with prefix: "{prefix} - {Company Name}"
+                    subaccount_name = f"{prefix.upper()} - {company_name}"
                     subaccount = bridge_api.create_subaccount(
                         subdomain=bridge_subaccount_id,
-                        name=company_name
+                        name=subaccount_name
                     )
                     subaccount_created = True
                 except BridgeSubaccountExists:
@@ -349,10 +352,12 @@ def create_bridge_subaccount(request):
         last_name = data.get('last_name', '')
         company_name = data.get('company_name', '')
         provision_id = data.get('provision_id', '')
+        prefix = data.get('prefix', 'ohsi')  # Default to 'ohsi' if not provided
         
         logger.info(f"Email: {email}")
         logger.info(f"Name: {first_name} {last_name}")
         logger.info(f"Company: {company_name}")
+        logger.info(f"Prefix: {prefix}")
         logger.info(f"Provision ID: {provision_id if provision_id else '(not provided)'}")
         
         if not email or not company_name:
@@ -370,9 +375,9 @@ def create_bridge_subaccount(request):
             logger.error(f"✗ Bridge API configuration error: {str(e)}")
             return JsonResponse({'error': f'Bridge API configuration error: {str(e)}'}, status=500)
         
-        # Generate base subaccount domain: ohsi-{company}-safetynow
+        # Generate base subaccount domain: {prefix}-{company}-safetynow
         logger.info("Step 7: Generating subaccount domain...")
-        base_subdomain = generate_subaccount_domain(company_name, prefix='ohsi', root_subdomain='safetynow')
+        base_subdomain = generate_subaccount_domain(company_name, prefix=prefix, root_subdomain='safetynow')
         logger.info(f"Generated base subdomain: {base_subdomain}")
         
         if not base_subdomain:
@@ -389,9 +394,14 @@ def create_bridge_subaccount(request):
         while attempt < max_attempts:
             try:
                 logger.info(f"Attempt {attempt + 1}/{max_attempts}: Trying to create subaccount: {subaccount_subdomain}")
+                # Create subaccount name with prefix: "{prefix} - {Company Name}"
+                # Example: "ohsi - TestAdrianov" or "hri - TestAdrianov"
+                subaccount_name = f"{prefix.upper()} - {company_name}"
+                logger.info(f"Subaccount name: {subaccount_name}")
+                
                 subaccount = bridge_api.create_subaccount(
                     subdomain=subaccount_subdomain,
-                    name=company_name
+                    name=subaccount_name
                 )
                 logger.info(f"✓ Successfully created Bridge subaccount: {subaccount_subdomain}")
                 logger.info(f"Subaccount ID: {subaccount.get('id') if subaccount else 'N/A'}")
