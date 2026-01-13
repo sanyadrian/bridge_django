@@ -17,6 +17,7 @@ urlpatterns = [
     
     # Sync endpoints
     path('api/sync-user-to-bridge/', views_sync.sync_user_to_bridge, name='sync_user_to_bridge'),
+    path('api/create-bridge-subaccount/', views_sync.create_bridge_subaccount, name='create_bridge_subaccount'),
     
     # Health check
     path('health/', views.health_check, name='health_check'),

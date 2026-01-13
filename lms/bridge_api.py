@@ -265,4 +265,46 @@ class BridgeAPI:
         """
         response = self._request('get', 'admin/sub_accounts', params={'limit': limit})
         return response.get('sub_accounts', [])
+    
+    def configure_sso(self, subdomain, django_base_url, client_id, login_attribute='email'):
+        """
+        Configure SSO/OAuth for a subaccount.
+        
+        Args:
+            subdomain: Subaccount subdomain (e.g., 'ohsi-adrianov-safetynow')
+            django_base_url: Base URL of Django app (e.g., 'https://yourdomain.com')
+            client_id: OAuth client ID
+            login_attribute: Login attribute ('email' or 'uid')
+        
+        Raises:
+            BridgeAPIError: If SSO configuration fails
+        """
+        # Ensure django_base_url doesn't have trailing slash
+        django_base_url = django_base_url.rstrip('/')
+        
+        auth_config = {
+            "provider": "OAuth2",
+            "subprovider": "oauth2",
+            "authorize_url": f"{django_base_url}/openid/authorize/",
+            "token_url": f"{django_base_url}/openid/token/",
+            "profile_url": f"{django_base_url}/openid/userinfo/",
+            "scope": "openid profile email",
+            "login_attribute": login_attribute,
+            "token_as_header": True,
+            "request_body_auth": False
+        }
+        
+        try:
+            self._request(
+                'patch',
+                'config/sub_account/auth',
+                subdomain=subdomain,
+                json={"auth": auth_config}
+            )
+        except BridgeAPIError as e:
+            # Log the error but don't fail the whole process
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Failed to configure SSO for subaccount {subdomain}: {str(e)}")
+            raise
 
