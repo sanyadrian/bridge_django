@@ -266,21 +266,30 @@ class BridgeAPI:
         response = self._request('get', 'admin/sub_accounts', params={'limit': limit})
         return response.get('sub_accounts', [])
     
-    def configure_sso(self, subdomain, django_base_url, client_id, login_attribute='email'):
+    def configure_sso(self, subdomain, django_base_url, client_id, client_secret, login_attribute='email'):
         """
         Configure SSO/OAuth for a subaccount.
         
         Args:
             subdomain: Subaccount subdomain (e.g., 'ohsi-adrianov-safetynow')
             django_base_url: Base URL of Django app (e.g., 'https://yourdomain.com')
-            client_id: OAuth client ID
+            client_id: OAuth client ID (required by Bridge)
+            client_secret: OAuth client secret (required by Bridge)
             login_attribute: Login attribute ('email' or 'uid')
         
         Raises:
             BridgeAPIError: If SSO configuration fails
         """
-        # Ensure django_base_url doesn't have trailing slash
+        import logging
+        from urllib.parse import urlparse, urlunparse
+        logger = logging.getLogger(__name__)
+        
+        # Ensure django_base_url uses HTTPS and doesn't have trailing slash
         django_base_url = django_base_url.rstrip('/')
+        parsed = urlparse(django_base_url)
+        if parsed.scheme != 'https':
+            parsed = parsed._replace(scheme='https')
+            django_base_url = urlunparse(parsed)
         
         auth_config = {
             "provider": "OAuth2",
@@ -291,20 +300,52 @@ class BridgeAPI:
             "scope": "openid profile email",
             "login_attribute": login_attribute,
             "token_as_header": True,
-            "request_body_auth": False
+            "request_body_auth": False,
+            "client_id": client_id,
+            "client_secret": client_secret
         }
         
+        logger.info(f"Configuring SSO for subaccount: {subdomain}")
+        logger.info(f"Django base URL: {django_base_url}")
+        logger.info(f"Client ID: {client_id}")
+        logger.info(f"Login attribute: {login_attribute}")
+        # Don't log client_secret for security
+        logger.info(f"Auth config (without secret): {json.dumps({k: v for k, v in auth_config.items() if k != 'client_secret'}, indent=2)}")
+        
         try:
-            self._request(
+            # Make request directly to the subaccount's API
+            # The subdomain parameter tells _request to use the subaccount's base URL
+            response = self._request(
                 'patch',
                 'config/sub_account/auth',
                 subdomain=subdomain,
                 json={"auth": auth_config}
             )
+            logger.info(f"✓ SSO configuration successful for {subdomain}")
+            logger.debug(f"Response: {json.dumps(response, indent=2) if response else 'No response body'}")
+            
+            # Verify SSO was actually configured by fetching it back
+            try:
+                verify_response = self._request(
+                    'get',
+                    'config/sub_account/auth',
+                    subdomain=subdomain
+                )
+                logger.info(f"✓ Verified SSO config: {json.dumps(verify_response.get('auth', {}), indent=2)}")
+            except Exception as verify_error:
+                logger.warning(f"Could not verify SSO config: {str(verify_error)}")
+            
+            return response
         except BridgeAPIError as e:
-            # Log the error but don't fail the whole process
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.error(f"Failed to configure SSO for subaccount {subdomain}: {str(e)}")
+            logger.error(f"✗ Failed to configure SSO for subaccount {subdomain}: {str(e)}")
+            logger.error(f"Error details: {type(e).__name__}")
+            # Try to get more details from the exception
+            if hasattr(e, 'response'):
+                logger.error(f"Response status: {e.response.status_code if hasattr(e.response, 'status_code') else 'N/A'}")
+                try:
+                    if hasattr(e.response, 'text'):
+                        logger.error(f"Response body: {e.response.text}")
+                except:
+                    pass
             raise
 

@@ -148,6 +148,7 @@ def sync_user_to_bridge(request):
         # Check if subaccount exists in Bridge, create if not
         subaccount = None
         subaccount_created = False
+        sso_needs_config = False
         try:
             subaccount = bridge_api.get_subaccount(bridge_subaccount_id)
             
@@ -166,17 +167,65 @@ def sync_user_to_bridge(request):
                         name=subaccount_name
                     )
                     subaccount_created = True
+                    sso_needs_config = True
+                    logger.info(f"✓ New subaccount created: {bridge_subaccount_id}")
                 except BridgeSubaccountExists:
                     # It was created between check and create - get it again
+                    logger.info(f"Subaccount {bridge_subaccount_id} was created concurrently, fetching it...")
                     subaccount = bridge_api.get_subaccount(bridge_subaccount_id)
+                    if subaccount:
+                        # Subaccount exists now, check if SSO is configured
+                        sso_needs_config = True
                 except BridgeAPIError as e:
                     return JsonResponse({
                         'error': f'Failed to create Bridge subaccount: {str(e)}'
                     }, status=500)
+            else:
+                # Subaccount exists - check if SSO needs to be configured
+                logger.info(f"Subaccount {bridge_subaccount_id} already exists")
+                # Always try to configure SSO (in case it wasn't configured before)
+                sso_needs_config = True
         except BridgeAPIError as e:
             return JsonResponse({
                 'error': f'Failed to check Bridge subaccount: {str(e)}'
             }, status=500)
+        
+        # Configure SSO if needed (for new subaccounts or if not configured)
+        if sso_needs_config and subaccount:
+            logger.info(f"Configuring SSO for subaccount: {bridge_subaccount_id}")
+            try:
+                # Get Django base URL from settings or request
+                django_base_url = getattr(settings, 'OHS_DJANGO_BASE_URL', None)
+                if not django_base_url:
+                    # Try to get from request
+                    django_base_url = request.build_absolute_uri('/').rstrip('/')
+                    # Remove the /api/sync-user-to-bridge/ part if present
+                    django_base_url = django_base_url.split('/api/')[0]
+                
+                logger.info(f"Django base URL: {django_base_url}")
+                logger.info(f"Client ID: {auth.client_id}")
+                logger.info(f"Client Secret: {'*' * len(auth.client_secret) if auth.client_secret else 'NOT SET'}")
+                
+                # Use auth credentials from the top of the function
+                if auth:
+                    bridge_api.configure_sso(
+                        subdomain=bridge_subaccount_id,
+                        django_base_url=django_base_url,
+                        client_id=auth.client_id,
+                        client_secret=auth.client_secret,
+                        login_attribute='email'
+                    )
+                    logger.info(f"✓ Successfully configured SSO for subaccount: {bridge_subaccount_id}")
+                else:
+                    logger.warning("No active auth found - SSO not configured")
+            except BridgeAPIError as sso_error:
+                logger.error(f"✗ Failed to configure SSO for {bridge_subaccount_id}: {str(sso_error)}")
+                logger.warning("Continuing despite SSO configuration failure - can be configured manually")
+                # Don't fail the whole process, but log the error
+            except Exception as sso_error:
+                logger.error(f"✗ Unexpected error configuring SSO for {bridge_subaccount_id}: {str(sso_error)}")
+                logger.exception("Full traceback:")
+                # Don't fail the whole process, but log the error
         
         # Create or update user in Bridge subaccount
         # Use email as uid since we don't have unique_id
@@ -442,12 +491,14 @@ def create_bridge_subaccount(request):
         
         logger.info(f"Django base URL: {django_base_url}")
         logger.info(f"Client ID: {auth.client_id}")
+        logger.info(f"Client Secret: {'*' * len(auth.client_secret) if auth.client_secret else 'NOT SET'}")
         
         try:
             bridge_api.configure_sso(
                 subdomain=subaccount_subdomain,
                 django_base_url=django_base_url,
                 client_id=auth.client_id,
+                client_secret=auth.client_secret,
                 login_attribute='email'
             )
             logger.info(f"✓ Successfully configured SSO for subaccount: {subaccount_subdomain}")
