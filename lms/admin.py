@@ -2,7 +2,10 @@
 Admin configuration for OHS Insider LMS models.
 """
 from django.contrib import admin
-from .models import OHSAccount, OHSAuth, OHSAccessLog, BridgeSyncTask, OAuthAuthorizationCode, OAuthAccessToken
+from .models import (
+    OHSAccount, OHSAuth, OHSAccessLog, BridgeSyncTask, 
+    OAuthAuthorizationCode, OAuthAccessToken, Course, Program, Package
+)
 
 
 @admin.register(OHSAccount)
@@ -56,3 +59,52 @@ class OAuthAccessTokenAdmin(admin.ModelAdmin):
     search_fields = ['token', 'account__unique_id', 'account__user_email']
     readonly_fields = ['created_at', 'expires_at']
     ordering = ['-created_at']
+
+
+@admin.register(Course)
+class CourseAdmin(admin.ModelAdmin):
+    list_display = ['title', 'bridge_id', 'active', 'updated_at']
+    list_filter = ['active', 'updated_at']
+    search_fields = ['title', 'description']
+    readonly_fields = ['bridge_id', 'created_at', 'updated_at']
+    ordering = ['title']
+
+
+@admin.register(Program)
+class ProgramAdmin(admin.ModelAdmin):
+    list_display = ['title', 'bridge_id', 'active', 'updated_at']
+    list_filter = ['active', 'updated_at']
+    search_fields = ['title', 'description']
+    readonly_fields = ['bridge_id', 'created_at', 'updated_at']
+    ordering = ['title']
+
+
+@admin.register(Package)
+class PackageAdmin(admin.ModelAdmin):
+    list_display = ['name', 'prefix', 'active', 'course_count', 'program_count', 'created_at']
+    list_filter = ['prefix', 'active', 'created_at']
+    search_fields = ['name', 'description']
+    readonly_fields = ['created_at', 'updated_at']
+    filter_horizontal = ['courses', 'programs']
+    fieldsets = (
+        ('Basic Information', {
+            'fields': ('name', 'prefix', 'description', 'active')
+        }),
+        ('Content', {
+            'fields': ('courses', 'programs'),
+            'description': 'Select courses and programs to include in this package. '
+                          'Package will be auto-assigned to subaccounts based on prefix.'
+        }),
+        ('Timestamps', {
+            'fields': ('created_at', 'updated_at'),
+            'classes': ('collapse',)
+        }),
+    )
+    
+    def course_count(self, obj):
+        return obj.courses.count()
+    course_count.short_description = 'Courses'
+    
+    def program_count(self, obj):
+        return obj.programs.count()
+    program_count.short_description = 'Programs'

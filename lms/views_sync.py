@@ -15,7 +15,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 from django.utils.decorators import method_decorator
 
-from .models import OHSAccount, OHSAuth
+from .models import OHSAccount, OHSAuth, Package
 from .bridge_api import BridgeAPI, BridgeSubaccountExists, BridgeUserExists, BridgeAPIError
 
 logger = logging.getLogger(__name__)
@@ -226,6 +226,76 @@ def sync_user_to_bridge(request):
                 logger.error(f"✗ Unexpected error configuring SSO for {bridge_subaccount_id}: {str(sso_error)}")
                 logger.exception("Full traceback:")
                 # Don't fail the whole process, but log the error
+        
+        # Auto-assign package courses and programs to subaccount based on prefix
+        if subaccount and subaccount.get('id'):
+            try:
+                subaccount_id = subaccount.get('id')
+                logger.info(f"Assigning package to subaccount {bridge_subaccount_id} (ID: {subaccount_id}) based on prefix: {prefix}")
+                
+                # Find package by prefix
+                try:
+                    package = Package.objects.get(prefix=prefix, active=True)
+                    logger.info(f"Found package: {package.name} with {package.courses.count()} courses and {package.programs.count()} programs")
+                    
+                    # Assign all courses from package
+                    courses_assigned = 0
+                    for course in package.courses.filter(active=True):
+                        try:
+                            bridge_api.set_course_affiliation(
+                                course_id=course.bridge_id,
+                                subaccount_id=subaccount_id,
+                                on=True
+                            )
+                            courses_assigned += 1
+                            logger.debug(f"Assigned course: {course.title} (ID: {course.bridge_id})")
+                        except BridgeAPIError as e:
+                            logger.warning(f"Failed to assign course {course.title} (ID: {course.bridge_id}): {str(e)}")
+                    
+                    # Assign all programs from package
+                    programs_assigned = 0
+                    for program in package.programs.filter(active=True):
+                        try:
+                            bridge_api.set_program_affiliation(
+                                program_id=program.bridge_id,
+                                subaccount_id=subaccount_id,
+                                on=True
+                            )
+                            programs_assigned += 1
+                            logger.debug(f"Assigned program: {program.title} (ID: {program.bridge_id})")
+                        except BridgeAPIError as e:
+                            logger.warning(f"Failed to assign program {program.title} (ID: {program.bridge_id}): {str(e)}")
+                    
+                    logger.info(f"✓ Package assignment complete: {courses_assigned} courses, {programs_assigned} programs assigned")
+                    
+                except Package.DoesNotExist:
+                    logger.warning(f"No active package found for prefix '{prefix}' - skipping package assignment")
+                except Package.MultipleObjectsReturned:
+                    logger.warning(f"Multiple packages found for prefix '{prefix}' - using first active one")
+                    package = Package.objects.filter(prefix=prefix, active=True).first()
+                    if package:
+                        # Same assignment logic as above
+                        courses_assigned = 0
+                        programs_assigned = 0
+                        for course in package.courses.filter(active=True):
+                            try:
+                                bridge_api.set_course_affiliation(course.bridge_id, subaccount_id, on=True)
+                                courses_assigned += 1
+                            except BridgeAPIError:
+                                pass
+                        for program in package.programs.filter(active=True):
+                            try:
+                                bridge_api.set_program_affiliation(program.bridge_id, subaccount_id, on=True)
+                                programs_assigned += 1
+                            except BridgeAPIError:
+                                pass
+                        logger.info(f"✓ Package assignment complete: {courses_assigned} courses, {programs_assigned} programs assigned")
+                    
+            except Exception as package_error:
+                logger.error(f"✗ Failed to assign package to subaccount {bridge_subaccount_id}: {str(package_error)}")
+                logger.exception("Full traceback:")
+                # Don't fail the whole process, but log the error
+                # Package can be assigned manually if needed
         
         # Create or update user in Bridge subaccount
         # Use email as uid since we don't have unique_id

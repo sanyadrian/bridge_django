@@ -186,3 +186,79 @@ class BridgeSyncTask(models.Model):
     
     def __str__(self):
         return f"{self.get_task_type_display()} - {self.account.unique_id} - {self.get_status_display()}"
+
+
+class Course(models.Model):
+    """
+    Course from Bridge LMS.
+    """
+    bridge_id = models.PositiveIntegerField(db_index=True, unique=True)
+    title = models.CharField(max_length=500, db_index=True, blank=True, null=True)
+    description = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    active = models.BooleanField(default=True, db_index=True)
+    
+    class Meta:
+        db_table = 'course'
+        ordering = ['title']
+        verbose_name = 'Course'
+        verbose_name_plural = 'Courses'
+    
+    def __str__(self):
+        return self.title or f'Course {self.bridge_id}'
+
+
+class Program(models.Model):
+    """
+    Program from Bridge LMS.
+    """
+    bridge_id = models.PositiveIntegerField(db_index=True, unique=True)
+    title = models.CharField(max_length=500, db_index=True, blank=True, null=True)
+    description = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    active = models.BooleanField(default=True, db_index=True)
+    
+    class Meta:
+        db_table = 'program'
+        ordering = ['title']
+        verbose_name = 'Program'
+        verbose_name_plural = 'Programs'
+    
+    def __str__(self):
+        return self.title or f'Program {self.bridge_id}'
+
+
+class Package(models.Model):
+    """
+    Package containing courses and programs for assignment to subaccounts.
+    Auto-assigned based on subaccount prefix.
+    """
+    PREFIX_CHOICES = [
+        ('ohsi', 'OHSI'),
+        ('ilt', 'ILT'),
+        ('hri', 'HRI'),
+    ]
+    
+    name = models.CharField(max_length=200, unique=True)
+    prefix = models.CharField(
+        max_length=10,
+        choices=PREFIX_CHOICES,
+        help_text="Subaccount prefix for auto-assignment (ohsi/ilt/hri)"
+    )
+    description = models.TextField(blank=True)
+    courses = models.ManyToManyField(Course, blank=True, related_name='packages')
+    programs = models.ManyToManyField(Program, blank=True, related_name='packages')
+    active = models.BooleanField(default=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'package'
+        ordering = ['name']
+        verbose_name = 'Package'
+        verbose_name_plural = 'Packages'
+    
+    def __str__(self):
+        return f"{self.name} ({self.get_prefix_display()})"

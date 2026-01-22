@@ -94,6 +94,186 @@ class BridgeAPI:
         except requests.exceptions.RequestException as e:
             raise BridgeAPIError(f"Request failed: {str(e)}") from e
     
+    def list_courses(self, limit=None, include_unpublished=False):
+        """
+        List all courses from the root Bridge account.
+        
+        Args:
+            limit: Maximum number of courses to return (None = all courses)
+            include_unpublished: Include unpublished/archived courses (default: False - only published)
+        
+        Returns:
+            List of course data dicts
+        """
+        import logging
+        import json
+        logger = logging.getLogger(__name__)
+        
+        courses = []
+        url = None  # Will be set to first page URL
+        params = {'limit': 100}  # Bridge API limit per page
+        
+        page_count = 0
+        while True:
+            page_count += 1
+            try:
+                # First page: use _request with path
+                if url is None:
+                    response = self._request('get', 'author/course_templates', params=params)
+                else:
+                    # Subsequent pages: use full URL directly with session
+                    logger.debug(f"Fetching next page: {url}")
+                    response_obj = self.session.get(url, timeout=60)
+                    response_obj.raise_for_status()
+                    response = response_obj.json()
+                
+                course_list = response.get('course_templates', [])
+                if not course_list:
+                    logger.info(f"No more courses on page {page_count}")
+                    break
+                
+                # Filter unpublished if needed
+                if not include_unpublished:
+                    course_list = [c for c in course_list if c.get('is_published', False)]
+                
+                courses.extend(course_list)
+                logger.info(f"Page {page_count}: Fetched {len(course_list)} courses (total so far: {len(courses)})")
+                
+                # Check limit
+                if limit and len(courses) >= limit:
+                    break
+                
+                # Check for next page
+                meta = response.get('meta', {})
+                next_url = meta.get('next')
+                if not next_url:
+                    logger.info(f"No more pages (meta: {json.dumps(meta, indent=2)})")
+                    break
+                
+                # Next URL is usually a full URL from Bridge
+                url = next_url
+                params = {}  # Next URL includes all params
+                
+            except Exception as e:
+                logger.error(f"Error fetching courses page {page_count}: {str(e)}", exc_info=True)
+                break
+        
+        result = courses[:limit] if limit else courses
+        logger.info(f"✓ Fetched {len(result)} courses from {page_count} page(s)")
+        return result
+    
+    def list_programs(self, limit=None, include_unpublished=False):
+        """
+        List all programs from the root Bridge account.
+        
+        Args:
+            limit: Maximum number of programs to return (None = all programs)
+            include_unpublished: Include unpublished/archived programs (default: False - only published)
+        
+        Returns:
+            List of program data dicts
+        """
+        import logging
+        import json
+        logger = logging.getLogger(__name__)
+        
+        programs = []
+        url = None  # Will be set to first page URL
+        params = {'limit': 100}  # Bridge API limit per page
+        
+        page_count = 0
+        while True:
+            page_count += 1
+            try:
+                # First page: use _request with path
+                if url is None:
+                    response = self._request('get', 'author/programs', params=params)
+                else:
+                    # Subsequent pages: use full URL directly with session
+                    logger.debug(f"Fetching next page: {url}")
+                    response_obj = self.session.get(url, timeout=60)
+                    response_obj.raise_for_status()
+                    response = response_obj.json()
+                
+                program_list = response.get('programs', [])
+                if not program_list:
+                    logger.info(f"No more programs on page {page_count}")
+                    break
+                
+                # Filter unpublished if needed
+                if not include_unpublished:
+                    program_list = [p for p in program_list if p.get('is_published', False)]
+                
+                programs.extend(program_list)
+                logger.info(f"Page {page_count}: Fetched {len(program_list)} programs (total so far: {len(programs)})")
+                
+                # Check limit
+                if limit and len(programs) >= limit:
+                    break
+                
+                # Check for next page
+                meta = response.get('meta', {})
+                next_url = meta.get('next')
+                if not next_url:
+                    logger.info(f"No more pages (meta: {json.dumps(meta, indent=2)})")
+                    break
+                
+                # Next URL is usually a full URL from Bridge
+                url = next_url
+                params = {}  # Next URL includes all params
+                
+            except Exception as e:
+                logger.error(f"Error fetching programs page {page_count}: {str(e)}", exc_info=True)
+                break
+        
+        result = programs[:limit] if limit else programs
+        logger.info(f"✓ Fetched {len(result)} programs from {page_count} page(s)")
+        return result
+    
+    def set_course_affiliation(self, course_id, subaccount_id, on=True):
+        """
+        Set course affiliation (share/revoke) for a subaccount.
+        
+        Args:
+            course_id: Bridge course ID
+            subaccount_id: Bridge subaccount ID
+            on: True to share, False to revoke
+        
+        Raises:
+            BridgeAPIError: If affiliation fails
+        """
+        self._request(
+            'put',
+            'author/affiliated_sub_accounts/share' if on else 'author/affiliated_sub_accounts/revoke',
+            json={
+                'item_type': 'Course',
+                'item_id': str(course_id),
+                'domain_id': str(subaccount_id)
+            }
+        )
+    
+    def set_program_affiliation(self, program_id, subaccount_id, on=True):
+        """
+        Set program affiliation (share/revoke) for a subaccount.
+        
+        Args:
+            program_id: Bridge program ID
+            subaccount_id: Bridge subaccount ID
+            on: True to share, False to revoke
+        
+        Raises:
+            BridgeAPIError: If affiliation fails
+        """
+        self._request(
+            'put',
+            'author/affiliated_sub_accounts/share' if on else 'author/affiliated_sub_accounts/revoke',
+            json={
+                'item_type': 'Program',
+                'item_id': str(program_id),
+                'domain_id': str(subaccount_id)
+            }
+        )
+    
     def get_subaccount(self, subdomain):
         """
         Get subaccount information.
