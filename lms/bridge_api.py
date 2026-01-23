@@ -70,7 +70,20 @@ class BridgeAPI:
         try:
             response = self.session.request(method, url, **kwargs)
             response.raise_for_status()
-            return response.json()
+            
+            # Handle empty responses (204 No Content)
+            if response.status_code == 204 or not response.content:
+                return {}
+            
+            # Try to parse JSON, handle empty/invalid JSON gracefully
+            try:
+                return response.json()
+            except json.JSONDecodeError:
+                # If response is not JSON, return empty dict and log warning
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning(f"Bridge API returned non-JSON response (status {response.status_code}): {response.text[:200]}")
+                return {}
         except requests.exceptions.HTTPError as e:
             # Try to parse error details
             try:
@@ -273,6 +286,42 @@ class BridgeAPI:
                 'domain_id': str(subaccount_id)
             }
         )
+
+    def set_affiliations_batch(self, affiliations, on=True):
+        """
+        Batch share/revoke course/program affiliations for a subaccount.
+
+        This is MUCH faster than calling set_course_affiliation() 500+ times.
+
+        Args:
+            affiliations: list[dict] like:
+                {"item_type": "Course"|"Program", "item_id": "...", "domain_id": "..."}
+            on: True to share, False to revoke
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        if not affiliations:
+            return
+
+        # Bridge endpoint supports batch updates
+        endpoint = 'author/affiliated_sub_accounts/share_batch' if on else 'author/affiliated_sub_accounts/revoke_batch'
+        action = 'sharing' if on else 'revoking'
+        
+        logger.info(f"Batch {action} {len(affiliations)} affiliations via {endpoint}")
+        
+        try:
+            response = self._request(
+                'put',
+                endpoint,
+                json={'affiliations': affiliations},
+                timeout=120
+            )
+            logger.info(f"✓ Batch {action} completed successfully")
+            return response
+        except BridgeAPIError as e:
+            logger.error(f"✗ Batch {action} failed: {str(e)}")
+            raise
     
     def get_subaccount(self, subdomain):
         """
