@@ -272,7 +272,7 @@ class BridgeAPI:
             'put',
             'author/affiliated_sub_accounts/share' if on else 'author/affiliated_sub_accounts/revoke',
             json={
-                'item_type': 'Course',
+                'item_type': 'CourseTemplate',
                 'item_id': str(course_id),
                 'domain_id': str(subaccount_id)
             }
@@ -308,7 +308,7 @@ class BridgeAPI:
 
         Args:
             affiliations: list[dict] like:
-                {"item_type": "Course"|"Program", "item_id": "...", "domain_id": "..."}
+                {"item_type": "CourseTemplate"|"Program", "item_id": "...", "domain_id": "..."}
             on: True to share, False to revoke
         """
         import logging

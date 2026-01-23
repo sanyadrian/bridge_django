@@ -342,7 +342,7 @@ def sync_user_to_bridge(request):
                         # Batch share courses (fast)
                         if courses:
                             course_affiliations = [
-                                {'item_type': 'Course', 'item_id': str(cid), 'domain_id': str(subaccount_id)}
+                                {'item_type': 'CourseTemplate', 'item_id': str(cid), 'domain_id': str(subaccount_id)}
                                 for cid in courses
                             ]
                             batch_num = 0
