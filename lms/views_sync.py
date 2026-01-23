@@ -336,6 +336,9 @@ def sync_user_to_bridge(request):
                             for i in range(0, len(items), size):
                                 yield items[i:i + size]
 
+                        # Bridge API limit: max 25 affiliations per batch
+                        BATCH_SIZE = 25
+
                         # Batch share courses (fast)
                         if courses:
                             course_affiliations = [
@@ -343,11 +346,32 @@ def sync_user_to_bridge(request):
                                 for cid in courses
                             ]
                             batch_num = 0
-                            for batch in _chunks(course_affiliations, 200):
+                            total_batches = (len(course_affiliations) + BATCH_SIZE - 1) // BATCH_SIZE
+                            courses_assigned = 0
+                            courses_failed = 0
+                            
+                            for batch in _chunks(course_affiliations, BATCH_SIZE):
                                 batch_num += 1
-                                logger.info(f"  Sharing batch {batch_num} of courses ({len(batch)} courses)...")
-                                bridge_api.set_affiliations_batch(batch, on=True)
-                            logger.info(f"✓ Shared {len(courses)} courses to subaccount")
+                                logger.info(f"  Sharing batch {batch_num}/{total_batches} of courses ({len(batch)} courses)...")
+                                try:
+                                    bridge_api.set_affiliations_batch(batch, on=True)
+                                    courses_assigned += len(batch)
+                                except BridgeAPIError as batch_error:
+                                    logger.warning(f"  Batch {batch_num} failed, trying individual assignments...")
+                                    # Fallback to individual assignments if batch fails
+                                    for affiliation in batch:
+                                        try:
+                                            bridge_api.set_course_affiliation(
+                                                course_id=int(affiliation['item_id']),
+                                                subaccount_id=int(affiliation['domain_id']),
+                                                on=True
+                                            )
+                                            courses_assigned += 1
+                                        except BridgeAPIError as individual_error:
+                                            courses_failed += 1
+                                            logger.warning(f"    Failed to assign course {affiliation['item_id']}: {str(individual_error)}")
+                            
+                            logger.info(f"✓ Shared {courses_assigned} courses to subaccount ({courses_failed} failed) in {total_batches} batch(es)")
                         else:
                             logger.info("  No courses to share")
 
@@ -358,11 +382,32 @@ def sync_user_to_bridge(request):
                                 for pid in programs
                             ]
                             batch_num = 0
-                            for batch in _chunks(program_affiliations, 200):
+                            total_batches = (len(program_affiliations) + BATCH_SIZE - 1) // BATCH_SIZE
+                            programs_assigned = 0
+                            programs_failed = 0
+                            
+                            for batch in _chunks(program_affiliations, BATCH_SIZE):
                                 batch_num += 1
-                                logger.info(f"  Sharing batch {batch_num} of programs ({len(batch)} programs)...")
-                                bridge_api.set_affiliations_batch(batch, on=True)
-                            logger.info(f"✓ Shared {len(programs)} programs to subaccount")
+                                logger.info(f"  Sharing batch {batch_num}/{total_batches} of programs ({len(batch)} programs)...")
+                                try:
+                                    bridge_api.set_affiliations_batch(batch, on=True)
+                                    programs_assigned += len(batch)
+                                except BridgeAPIError as batch_error:
+                                    logger.warning(f"  Batch {batch_num} failed, trying individual assignments...")
+                                    # Fallback to individual assignments if batch fails
+                                    for affiliation in batch:
+                                        try:
+                                            bridge_api.set_program_affiliation(
+                                                program_id=int(affiliation['item_id']),
+                                                subaccount_id=int(affiliation['domain_id']),
+                                                on=True
+                                            )
+                                            programs_assigned += 1
+                                        except BridgeAPIError as individual_error:
+                                            programs_failed += 1
+                                            logger.warning(f"    Failed to assign program {affiliation['item_id']}: {str(individual_error)}")
+                            
+                            logger.info(f"✓ Shared {programs_assigned} programs to subaccount ({programs_failed} failed) in {total_batches} batch(es)")
                         else:
                             logger.info("  No programs to share")
 

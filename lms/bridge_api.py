@@ -86,12 +86,23 @@ class BridgeAPI:
                 return {}
         except requests.exceptions.HTTPError as e:
             # Try to parse error details
+            import logging
+            logger = logging.getLogger(__name__)
+            
+            # Log the full error response for debugging
             try:
+                error_text = e.response.text
+                logger.error(f"Bridge API error response (status {e.response.status_code}): {error_text[:500]}")
+                
                 error_data = e.response.json()
                 errors = error_data.get('errors', [])
                 if errors:
                     error_code = errors[0].get('code', '')
                     error_title = errors[0].get('title', str(e))
+                    error_detail = errors[0].get('detail', '')
+                    
+                    # Log full error details
+                    logger.error(f"Bridge API error - Code: {error_code}, Title: {error_title}, Detail: {error_detail}")
                     
                     # Handle specific error cases
                     if error_code in ('taken', 'unique_violation'):
@@ -99,9 +110,11 @@ class BridgeAPI:
                     elif error_code == 'not_unique':
                         raise BridgeUserExists(f"User already exists: {error_title}") from e
                     
-                    raise BridgeAPIError(f"Bridge API error: {error_title}") from e
-            except (json.JSONDecodeError, KeyError):
-                pass
+                    raise BridgeAPIError(f"Bridge API error: {error_title} (Detail: {error_detail})") from e
+            except (json.JSONDecodeError, KeyError, AttributeError) as parse_error:
+                logger.error(f"Could not parse Bridge API error response: {str(parse_error)}")
+                if hasattr(e, 'response') and hasattr(e.response, 'text'):
+                    logger.error(f"Raw response text: {e.response.text[:500]}")
             
             raise BridgeAPIError(f"Bridge API error: {str(e)}") from e
         except requests.exceptions.RequestException as e:
@@ -310,6 +323,10 @@ class BridgeAPI:
         
         logger.info(f"Batch {action} {len(affiliations)} affiliations via {endpoint}")
         
+        # Log first affiliation for debugging
+        if affiliations:
+            logger.debug(f"Sample affiliation: {affiliations[0]}")
+        
         try:
             response = self._request(
                 'put',
@@ -321,6 +338,7 @@ class BridgeAPI:
             return response
         except BridgeAPIError as e:
             logger.error(f"✗ Batch {action} failed: {str(e)}")
+            logger.error(f"Request payload (first 3 affiliations): {affiliations[:3] if len(affiliations) >= 3 else affiliations}")
             raise
     
     def get_subaccount(self, subdomain):
