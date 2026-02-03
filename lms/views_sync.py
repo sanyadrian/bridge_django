@@ -415,6 +415,7 @@ def sync_user_to_bridge(request):
                                             logger.warning(f"    Failed to assign course {affiliation['item_id']}: {str(individual_error)}")
                             
                             logger.info(f"✓ Shared {courses_assigned} courses to subaccount ({courses_failed} failed) in {total_batches} batch(es)")
+                            logger.info(f"  Note: Course relevance ('Available in Library') can be set manually via Bridge UI if needed")
                         else:
                             logger.info("  No courses to share")
 
