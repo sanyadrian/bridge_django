@@ -10,15 +10,36 @@ class OHSAccount(models.Model):
     """
     OHS Insider account linking unique IDs to Bridge subaccounts.
     """
+    PREFIX_CHOICES = [
+        ('ohsi', 'OHSI'),
+        ('hri', 'HRI'),
+        ('ilt', 'ILT'),
+    ]
+    
     unique_id = models.CharField(
         max_length=50, 
         unique=True, 
         db_index=True,
         help_text="OHS Insider unique ID (e.g., 2019513-AIR-G-48)"
     )
+    prefix = models.CharField(
+        max_length=10,
+        choices=PREFIX_CHOICES,
+        blank=True,
+        null=True,
+        db_index=True,
+        help_text="Bridge subaccount prefix (ohsi/hri/ilt) - used to identify account type"
+    )
     bridge_subaccount_id = models.CharField(
         max_length=100,
+        blank=True,
         help_text="Bridge LMS subaccount identifier (subdomain)"
+    )
+    unique_url = models.URLField(
+        max_length=500,
+        blank=True,
+        null=True,
+        help_text="Bridge subaccount URL (e.g., https://ohsiaircanada-safetynow.bridgeapp.com)"
     )
     company_name = models.CharField(
         max_length=200,

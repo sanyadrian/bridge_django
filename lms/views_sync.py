@@ -333,6 +333,7 @@ def sync_user_to_bridge(request):
                 bridge_subaccount_id=bridge_subaccount_id,
                 bridge_user_id=bridge_user.get('id') if bridge_user else None,
                 bridge_account_id=subaccount.get('id') if subaccount else None,
+                prefix=prefix if prefix in ['ohsi', 'hri', 'ilt'] else None,
             )
 
         # Auto-assign package courses and programs to subaccount based on prefix
@@ -778,6 +779,459 @@ def create_bridge_subaccount(request):
         import traceback
         logger.error(f"Traceback:\n{traceback.format_exc()}")
         logger.error("=" * 80)
+        return JsonResponse({
+            'error': f'Internal server error: {str(e)}'
+        }, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def import_users_from_plugin(request):
+    """
+    API endpoint to import existing users from WordPress plugin to Django.
+    This syncs users that existed before the Django app was created.
+    
+    Expected POST data:
+    {
+        "users": [
+            {
+                "unique_id": "2019513-AIR-G-48",
+                "email": "user@example.com",
+                "first_name": "John",
+                "last_name": "Doe",
+                "unique_url": "https://ohsiaircanada-safetynow.bridgeapp.com",
+                "prefix": "ohsi",  # Optional, will be extracted from unique_url if not provided
+                "company_name": "Air Canada"  # Optional
+            },
+            ...
+        ]
+    }
+    """
+    logger = logging.getLogger(__name__)
+    
+    try:
+        # Parse request data
+        try:
+            data = json.loads(request.body)
+        except json.JSONDecodeError:
+            return JsonResponse({'error': 'Invalid JSON'}, status=400)
+        
+        users_data = data.get('users', [])
+        if not users_data:
+            return JsonResponse({'error': 'No users provided'}, status=400)
+        
+        if not isinstance(users_data, list):
+            return JsonResponse({'error': 'users must be a list'}, status=400)
+        
+        logger.info(f"Importing {len(users_data)} users from plugin...")
+        
+        results = {
+            'created': [],
+            'updated': [],
+            'failed': []
+        }
+        
+        for user_data in users_data:
+            try:
+                unique_id = user_data.get('unique_id')
+                if not unique_id:
+                    results['failed'].append({
+                        'data': user_data,
+                        'error': 'Missing unique_id'
+                    })
+                    continue
+                
+                # Normalize unique_id: replace spaces with + (for consistency)
+                # WordPress might have "2019513-AIR -G-48" but we need "2019513-AIR+-G-48"
+                unique_id = unique_id.replace(' ', '+')
+                
+                email = user_data.get('email', '')
+                first_name = user_data.get('first_name', '')
+                last_name = user_data.get('last_name', '')
+                unique_url = user_data.get('unique_url', '')
+                prefix = user_data.get('prefix', '')
+                company_name = user_data.get('company_name', '')
+                
+                # Extract prefix from unique_url if not provided
+                if not prefix and unique_url:
+                    try:
+                        from urllib.parse import urlparse
+                        parsed_url = urlparse(unique_url)
+                        subdomain = parsed_url.netloc.split('.')[0]
+                        # Extract prefix from subdomain (e.g., "ohsiaircanada-safetynow" -> "ohsi")
+                        if subdomain.startswith('ohsi'):
+                            prefix = 'ohsi'
+                        elif subdomain.startswith('hri'):
+                            prefix = 'hri'
+                        elif subdomain.startswith('ilt'):
+                            prefix = 'ilt'
+                    except:
+                        pass
+                
+                # Extract bridge_subaccount_id from unique_url if not provided
+                bridge_subaccount_id = user_data.get('bridge_subaccount_id', '')
+                if not bridge_subaccount_id and unique_url:
+                    try:
+                        from urllib.parse import urlparse
+                        parsed_url = urlparse(unique_url)
+                        bridge_subaccount_id = parsed_url.netloc.split('.')[0]
+                    except:
+                        pass
+                
+                # Create or update account
+                account, created = OHSAccount.objects.update_or_create(
+                    unique_id=unique_id,
+                    defaults={
+                        'user_email': email,
+                        'first_name': first_name,
+                        'last_name': last_name,
+                        'unique_url': unique_url,
+                        'prefix': prefix if prefix in ['ohsi', 'hri', 'ilt'] else None,
+                        'bridge_subaccount_id': bridge_subaccount_id,
+                        'company_name': company_name,
+                        'is_active': True
+                    }
+                )
+                
+                if created:
+                    results['created'].append({
+                        'unique_id': unique_id,
+                        'email': email
+                    })
+                    logger.info(f"✓ Created account: {unique_id} ({email})")
+                else:
+                    results['updated'].append({
+                        'unique_id': unique_id,
+                        'email': email
+                    })
+                    logger.info(f"✓ Updated account: {unique_id} ({email})")
+                    
+            except Exception as e:
+                results['failed'].append({
+                    'data': user_data,
+                    'error': str(e)
+                })
+                logger.error(f"✗ Failed to import user {user_data.get('unique_id', 'unknown')}: {str(e)}")
+        
+        return JsonResponse({
+            'success': True,
+            'message': f'User import completed',
+            'summary': {
+                'total': len(users_data),
+                'created': len(results['created']),
+                'updated': len(results['updated']),
+                'failed': len(results['failed'])
+            },
+            'results': results
+        })
+        
+    except Exception as e:
+        logger.error(f"Error in import_users_from_plugin: {str(e)}", exc_info=True)
+        return JsonResponse({
+            'error': f'Internal server error: {str(e)}'
+        }, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def sync_existing_user_sso(request):
+    """
+    API endpoint to sync SSO for an existing user.
+    For existing users, we only configure SSO - no subaccount creation or package assignment.
+    
+    Expected POST data:
+    {
+        "account_id": 123,  # OHSAccount ID
+        OR
+        "unique_id": "2019513-AIR-G-48",  # OHSAccount unique_id
+        OR
+        "email": "user@example.com",  # User email
+    }
+    """
+    logger = logging.getLogger(__name__)
+    
+    try:
+        # Get authentication credentials
+        auth = OHSAuth.objects.filter(is_active=True).first()
+        if not auth:
+            return JsonResponse({'error': 'No active authentication configured'}, status=500)
+        
+        # Parse request data
+        try:
+            data = json.loads(request.body)
+        except json.JSONDecodeError:
+            return JsonResponse({'error': 'Invalid JSON'}, status=400)
+        
+        # Find the account
+        account = None
+        if 'account_id' in data:
+            try:
+                account = OHSAccount.objects.get(id=int(data['account_id']))
+            except (OHSAccount.DoesNotExist, ValueError):
+                return JsonResponse({'error': 'Account not found'}, status=404)
+        elif 'unique_id' in data:
+            try:
+                account = OHSAccount.objects.get(unique_id=data['unique_id'])
+            except OHSAccount.DoesNotExist:
+                return JsonResponse({'error': 'Account not found'}, status=404)
+        elif 'email' in data:
+            try:
+                account = OHSAccount.objects.get(user_email=data['email'])
+            except (OHSAccount.DoesNotExist, OHSAccount.MultipleObjectsReturned):
+                return JsonResponse({'error': 'Account not found or multiple accounts found'}, status=404)
+        else:
+            return JsonResponse({'error': 'Must provide account_id, unique_id, or email'}, status=400)
+        
+        if not account:
+            return JsonResponse({'error': 'Account not found'}, status=404)
+        
+        # Check if account has unique_url
+        if not account.unique_url:
+            return JsonResponse({
+                'error': 'Account does not have unique_url field set. Cannot determine subaccount.',
+                'account_id': account.id,
+                'unique_id': account.unique_id
+            }, status=400)
+        
+        # Extract subdomain from unique_url
+        # Format: https://ohsiaircanada-safetynow.bridgeapp.com
+        # We need: ohsiaircanada-safetynow
+        try:
+            from urllib.parse import urlparse
+            parsed_url = urlparse(account.unique_url)
+            subdomain = parsed_url.netloc.split('.')[0]  # Get first part before .bridgeapp.com
+            if not subdomain:
+                raise ValueError("Could not extract subdomain from URL")
+        except Exception as e:
+            logger.error(f"Failed to extract subdomain from unique_url '{account.unique_url}': {str(e)}")
+            return JsonResponse({
+                'error': f'Invalid unique_url format: {account.unique_url}',
+                'account_id': account.id
+            }, status=400)
+        
+        logger.info(f"Syncing SSO for existing user: {account.user_email} (subdomain: {subdomain})")
+        
+        # Initialize Bridge API
+        bridge_api = BridgeAPI()
+        
+        # Configure SSO
+        try:
+            # Get Django base URL from request
+            django_base_url = request.build_absolute_uri('/').rstrip('/')
+            # Remove the /api/sync-existing-user-sso/ part if present
+            django_base_url = django_base_url.split('/api/')[0]
+            
+            logger.info(f"Configuring SSO for subaccount: {subdomain}")
+            logger.info(f"Django base URL: {django_base_url}")
+            logger.info(f"Client ID: {auth.client_id}")
+            
+            bridge_api.configure_sso(
+                subdomain=subdomain,
+                django_base_url=django_base_url,
+                client_id=auth.client_id,
+                client_secret=auth.client_secret,
+                login_attribute='email'
+            )
+            logger.info(f"✓ Successfully configured SSO for subaccount: {subdomain}")
+            
+            # Update bridge_subaccount_id if not set
+            if not account.bridge_subaccount_id:
+                account.bridge_subaccount_id = subdomain
+                account.save()
+            
+            return JsonResponse({
+                'success': True,
+                'message': 'SSO configured successfully for existing user',
+                'data': {
+                    'account_id': account.id,
+                    'unique_id': account.unique_id,
+                    'email': account.user_email,
+                    'subdomain': subdomain,
+                }
+            })
+            
+        except BridgeAPIError as sso_error:
+            logger.error(f"✗ Failed to configure SSO for {subdomain}: {str(sso_error)}")
+            return JsonResponse({
+                'error': f'Failed to configure SSO: {str(sso_error)}',
+                'account_id': account.id,
+                'subdomain': subdomain
+            }, status=500)
+        except Exception as sso_error:
+            logger.error(f"✗ Unexpected error configuring SSO for {subdomain}: {str(sso_error)}")
+            logger.exception("Full traceback:")
+            return JsonResponse({
+                'error': f'Unexpected error: {str(sso_error)}',
+                'account_id': account.id
+            }, status=500)
+        
+    except Exception as e:
+        logger.error(f"Error in sync_existing_user_sso: {str(e)}", exc_info=True)
+        return JsonResponse({
+            'error': f'Internal server error: {str(e)}'
+        }, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def sync_existing_users_batch(request):
+    """
+    API endpoint to sync SSO for multiple existing users in batch.
+    
+    Expected POST data:
+    {
+        "account_ids": [123, 456, 789],  # List of OHSAccount IDs
+        OR
+        "unique_ids": ["2019513-AIR-G-48", "2019514-AIR-G-49"],  # List of unique_ids
+        OR
+        "all": true,  # Sync all accounts with unique_url set
+    }
+    """
+    logger = logging.getLogger(__name__)
+    
+    try:
+        # Get authentication credentials
+        auth = OHSAuth.objects.filter(is_active=True).first()
+        if not auth:
+            return JsonResponse({'error': 'No active authentication configured'}, status=500)
+        
+        # Parse request data
+        try:
+            data = json.loads(request.body)
+        except json.JSONDecodeError:
+            return JsonResponse({'error': 'Invalid JSON'}, status=400)
+        
+        # Get accounts to sync
+        accounts = []
+        if data.get('all'):
+            # Get all accounts with unique_url set
+            accounts = list(OHSAccount.objects.filter(unique_url__isnull=False).exclude(unique_url=''))
+            logger.info(f"Syncing SSO for all {len(accounts)} accounts with unique_url")
+        elif 'account_ids' in data:
+            account_ids = data['account_ids']
+            if not isinstance(account_ids, list):
+                return JsonResponse({'error': 'account_ids must be a list'}, status=400)
+            accounts = list(OHSAccount.objects.filter(id__in=account_ids))
+            logger.info(f"Syncing SSO for {len(accounts)} accounts (requested {len(account_ids)})")
+        elif 'unique_ids' in data:
+            unique_ids = data['unique_ids']
+            if not isinstance(unique_ids, list):
+                return JsonResponse({'error': 'unique_ids must be a list'}, status=400)
+            accounts = list(OHSAccount.objects.filter(unique_id__in=unique_ids))
+            logger.info(f"Syncing SSO for {len(accounts)} accounts (requested {len(unique_ids)})")
+        else:
+            return JsonResponse({'error': 'Must provide account_ids, unique_ids, or all=true'}, status=400)
+        
+        if not accounts:
+            return JsonResponse({'error': 'No accounts found to sync'}, status=404)
+        
+        # Get Django base URL from request
+        django_base_url = request.build_absolute_uri('/').rstrip('/')
+        django_base_url = django_base_url.split('/api/')[0]
+        
+        # Initialize Bridge API
+        bridge_api = BridgeAPI()
+        
+        results = {
+            'success': [],
+            'failed': [],
+            'skipped': []
+        }
+        
+        for account in accounts:
+            try:
+                # Check if account has unique_url
+                if not account.unique_url:
+                    results['skipped'].append({
+                        'account_id': account.id,
+                        'unique_id': account.unique_id,
+                        'email': account.user_email,
+                        'reason': 'No unique_url set'
+                    })
+                    continue
+                
+                # Extract subdomain from unique_url
+                try:
+                    from urllib.parse import urlparse
+                    parsed_url = urlparse(account.unique_url)
+                    subdomain = parsed_url.netloc.split('.')[0]
+                    if not subdomain:
+                        raise ValueError("Could not extract subdomain")
+                    
+                    # Extract and update prefix if not set
+                    if not account.prefix:
+                        if subdomain.startswith('ohsi'):
+                            account.prefix = 'ohsi'
+                        elif subdomain.startswith('hri'):
+                            account.prefix = 'hri'
+                        elif subdomain.startswith('ilt'):
+                            account.prefix = 'ilt'
+                        if account.prefix:
+                            account.save()
+                except Exception as e:
+                    results['failed'].append({
+                        'account_id': account.id,
+                        'unique_id': account.unique_id,
+                        'email': account.user_email,
+                        'error': f'Invalid unique_url format: {account.unique_url}'
+                    })
+                    continue
+                
+                # Configure SSO
+                try:
+                    bridge_api.configure_sso(
+                        subdomain=subdomain,
+                        django_base_url=django_base_url,
+                        client_id=auth.client_id,
+                        client_secret=auth.client_secret,
+                        login_attribute='email'
+                    )
+                    
+                    # Update bridge_subaccount_id if not set
+                    if not account.bridge_subaccount_id:
+                        account.bridge_subaccount_id = subdomain
+                        account.save()
+                    
+                    results['success'].append({
+                        'account_id': account.id,
+                        'unique_id': account.unique_id,
+                        'email': account.user_email,
+                        'subdomain': subdomain
+                    })
+                    logger.info(f"✓ Configured SSO for {account.user_email} (subdomain: {subdomain})")
+                    
+                except BridgeAPIError as sso_error:
+                    results['failed'].append({
+                        'account_id': account.id,
+                        'unique_id': account.unique_id,
+                        'email': account.user_email,
+                        'error': str(sso_error)
+                    })
+                    logger.warning(f"✗ Failed to configure SSO for {account.user_email}: {str(sso_error)}")
+                    
+            except Exception as e:
+                results['failed'].append({
+                    'account_id': account.id,
+                    'unique_id': account.unique_id,
+                    'email': account.user_email,
+                    'error': str(e)
+                })
+                logger.error(f"✗ Error processing account {account.id}: {str(e)}")
+        
+        return JsonResponse({
+            'success': True,
+            'message': f'Batch SSO sync completed',
+            'summary': {
+                'total': len(accounts),
+                'success': len(results['success']),
+                'failed': len(results['failed']),
+                'skipped': len(results['skipped'])
+            },
+            'results': results
+        })
+        
+    except Exception as e:
+        logger.error(f"Error in sync_existing_users_batch: {str(e)}", exc_info=True)
         return JsonResponse({
             'error': f'Internal server error: {str(e)}'
         }, status=500)

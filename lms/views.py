@@ -6,6 +6,7 @@ import hmac
 import time
 import json
 import base64
+import logging
 from urllib.parse import urlencode, quote
 
 from django.conf import settings
@@ -154,7 +155,49 @@ def authenticate_user(request, unique_id):
     Creates Django user if needed and logs them in for OIDC flow.
     """
     try:
-        account = get_object_or_404(OHSAccount, unique_id=unique_id, is_active=True)
+        # URL decode the unique_id (Django might decode + as space, or we might have encoded characters)
+        from urllib.parse import unquote
+        # Django URL routing automatically decodes, but + might be decoded as space
+        # So we need to handle both the original and URL-decoded versions
+        decoded_unique_id = unquote(unique_id.replace(' ', '+'))  # Replace spaces back to + if needed
+        
+        # Try to find account with the decoded unique_id
+        account = None
+        try:
+            account = OHSAccount.objects.get(unique_id=decoded_unique_id, is_active=True)
+        except OHSAccount.DoesNotExist:
+            # Try with the original unique_id as well (in case it wasn't encoded)
+            try:
+                account = OHSAccount.objects.get(unique_id=unique_id, is_active=True)
+            except OHSAccount.DoesNotExist:
+                # Try with space replaced by + (in case Django decoded + as space)
+                try:
+                    account = OHSAccount.objects.get(unique_id=unique_id.replace(' ', '+'), is_active=True)
+                except OHSAccount.DoesNotExist:
+                    # Last try: try with + replaced by space
+                    try:
+                        account = OHSAccount.objects.get(unique_id=unique_id.replace('+', ' '), is_active=True)
+                    except OHSAccount.DoesNotExist:
+                        # Fallback: try by email (for existing users)
+                        email = request.GET.get('email')
+                        if email:
+                            try:
+                                account = OHSAccount.objects.get(user_email=email, is_active=True)
+                                logger = logging.getLogger(__name__)
+                                logger.info(f"Found account by email fallback: {email}")
+                            except OHSAccount.DoesNotExist:
+                                pass
+                            except OHSAccount.MultipleObjectsReturned:
+                                pass
+        
+        if not account:
+            # Log the attempted unique_id for debugging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Account not found for unique_id: {unique_id} (decoded: {decoded_unique_id})")
+            email = request.GET.get('email')
+            if email:
+                logger.warning(f"Also tried email: {email}")
+            return HttpResponseBadRequest(f'Account not found. unique_id: {unique_id}' + (f', email: {email}' if email else ''))
         
         # Log the access attempt
         OHSAccessLog.objects.create(
@@ -205,8 +248,10 @@ def authenticate_user(request, unique_id):
         
         return HttpResponseRedirect(bridge_url)
         
-    except OHSAccount.DoesNotExist:
-        return HttpResponseBadRequest('Account not found')
+    except OHSAccount.MultipleObjectsReturned:
+        logger = logging.getLogger(__name__)
+        logger.error(f"Multiple accounts found for unique_id: {unique_id}")
+        return HttpResponseBadRequest('Multiple accounts found')
     except Exception as e:
         return HttpResponseBadRequest(f'Error: {str(e)}')
 

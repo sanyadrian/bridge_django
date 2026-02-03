@@ -1,20 +1,102 @@
 """
 Admin configuration for OHS Insider LMS models.
 """
+import json
 from django.contrib import admin
+from django.http import JsonResponse
+from django.test import RequestFactory
 from .models import (
     OHSAccount, OHSAuth, OHSAccessLog, BridgeSyncTask, 
     OAuthAuthorizationCode, OAuthAccessToken, Course, Program, Package
 )
+from .views_sync import sync_existing_user_sso, sync_existing_users_batch
 
 
 @admin.register(OHSAccount)
 class OHSAccountAdmin(admin.ModelAdmin):
-    list_display = ['unique_id', 'user_email', 'first_name', 'last_name', 'is_active', 'created_at']
-    list_filter = ['is_active', 'created_at']
-    search_fields = ['unique_id', 'user_email', 'first_name', 'last_name']
+    list_display = ['unique_id', 'user_email', 'first_name', 'last_name', 'prefix', 'unique_url', 'is_active', 'created_at']
+    list_filter = ['prefix', 'is_active', 'created_at']
+    search_fields = ['unique_id', 'user_email', 'first_name', 'last_name', 'unique_url', 'bridge_subaccount_id']
     readonly_fields = ['created_at', 'updated_at']
-    ordering = ['unique_id']
+    ordering = ['prefix', 'unique_id']
+    
+    fieldsets = (
+        ('Basic Information', {
+            'fields': ('unique_id', 'prefix', 'user_email', 'first_name', 'last_name', 'is_active')
+        }),
+        ('Bridge Integration', {
+            'fields': ('bridge_subaccount_id', 'unique_url', 'company_name', 'bridge_user_id', 'bridge_account_id')
+        }),
+        ('Timestamps', {
+            'fields': ('created_at', 'updated_at'),
+            'classes': ('collapse',)
+        }),
+    )
+    
+    actions = ['sync_sso_selected']
+    
+    def sync_sso_selected(self, request, queryset):
+        """Admin action to sync SSO for selected accounts."""
+        from urllib.parse import urlparse
+        from .bridge_api import BridgeAPI
+        from django.conf import settings
+        
+        auth = OHSAuth.objects.filter(is_active=True).first()
+        if not auth:
+            self.message_user(request, "No active authentication configured", level='error')
+            return
+        
+        bridge_api = BridgeAPI()
+        success_count = 0
+        failed_count = 0
+        skipped_count = 0
+        
+        # Get Django base URL from settings or request
+        try:
+            django_base_url = getattr(settings, 'OHS_BRIDGE_BASE_URL', None)
+            if not django_base_url:
+                # Try to get from request
+                django_base_url = request.build_absolute_uri('/').rstrip('/')
+                django_base_url = django_base_url.split('/admin/')[0]
+        except:
+            django_base_url = 'https://bridgeadmin.safetynow.com'
+        
+        for account in queryset:
+            if not account.unique_url:
+                skipped_count += 1
+                continue
+            
+            try:
+                # Extract subdomain from unique_url
+                parsed_url = urlparse(account.unique_url)
+                subdomain = parsed_url.netloc.split('.')[0]
+                if not subdomain:
+                    failed_count += 1
+                    continue
+                
+                # Configure SSO
+                bridge_api.configure_sso(
+                    subdomain=subdomain,
+                    django_base_url=django_base_url,
+                    client_id=auth.client_id,
+                    client_secret=auth.client_secret,
+                    login_attribute='email'
+                )
+                
+                # Update bridge_subaccount_id if not set
+                if not account.bridge_subaccount_id:
+                    account.bridge_subaccount_id = subdomain
+                    account.save()
+                
+                success_count += 1
+            except Exception as e:
+                failed_count += 1
+                self.message_user(request, f"Error syncing {account.unique_id}: {str(e)}", level='warning')
+        
+        self.message_user(request, 
+            f"SSO sync completed: {success_count} succeeded, {failed_count} failed, {skipped_count} skipped",
+            level='success')
+    sync_sso_selected.short_description = "Sync SSO for selected accounts"
 
 
 @admin.register(OHSAuth)
