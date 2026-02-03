@@ -255,6 +255,49 @@ def sync_user_to_bridge(request):
                         last_name=last_name
                     )
                     user_created = True
+                    
+                    # Assign "Sub Account Administrator" role to newly created user
+                    if bridge_user and bridge_user.get('id'):
+                        try:
+                            logger.info(f"Assigning 'Sub Account Administrator' role to user {bridge_user.get('id')}...")
+                            
+                            # Try to find role by name first (if role listing works)
+                            role_names_to_try = [
+                                "Sub Account Administrator",
+                                "Sub Account Admin",
+                                "SubAccount Administrator",
+                                "SubAccount Admin"
+                            ]
+                            
+                            role_id = None
+                            found_role_name = None
+                            
+                            for role_name in role_names_to_try:
+                                role_id = bridge_api.get_role_by_name(bridge_subaccount_id, role_name)
+                                if role_id:
+                                    found_role_name = role_name
+                                    break
+                            
+                            # If role listing doesn't work, use hardcoded role ID
+                            if not role_id:
+                                logger.info("  Role listing not available, using known Sub Account Administrator role ID")
+                                role_id = bridge_api.get_sub_account_admin_role_id()
+                                found_role_name = "Sub Account Administrator (by ID)"
+                            
+                            if role_id:
+                                bridge_api.assign_user_roles(
+                                    subdomain=bridge_subaccount_id,
+                                    user_id=bridge_user.get('id'),
+                                    role_ids=[role_id]
+                                )
+                                logger.info(f"✓ Successfully assigned '{found_role_name}' role to user")
+                            else:
+                                logger.warning(f"✗ Could not determine Sub Account Administrator role ID")
+                                logger.warning(f"  Skipping role assignment - can be assigned manually")
+                        except Exception as role_error:
+                            logger.error(f"✗ Failed to assign role to user: {str(role_error)}")
+                            logger.exception("Full traceback:")
+                            # Don't fail the whole process; role can be assigned manually if needed
                 except BridgeUserExists:
                     # User was created between check and create - get it
                     existing_user = bridge_api.get_user(bridge_subaccount_id, email)
@@ -412,6 +455,8 @@ def sync_user_to_bridge(request):
                             logger.info("  No programs to share")
 
                         logger.info("✓ Package assignment complete for NEW subaccount")
+                        logger.info("  Note: Courses/programs are now affiliated (accessible) to the subaccount.")
+                        logger.info("  Administrators can enroll learners from their Training tab.")
             except Exception as package_error:
                 logger.error(f"✗ Failed to assign package to NEW subaccount {bridge_subaccount_id}: {str(package_error)}")
                 logger.exception("Full traceback:")

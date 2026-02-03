@@ -341,6 +341,216 @@ class BridgeAPI:
             logger.error(f"Request payload (first 3 affiliations): {affiliations[:3] if len(affiliations) >= 3 else affiliations}")
             raise
     
+    def enroll_user_in_course(self, subdomain, user_id, course_id):
+        """
+        Enroll a user in a course.
+        
+        Note: This endpoint is called from the subaccount, not root account.
+        
+        Args:
+            subdomain: Subaccount subdomain
+            user_id: Bridge user ID (from subaccount)
+            course_id: Bridge course template ID
+            
+        Raises:
+            BridgeAPIError: If enrollment fails
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        # Endpoint: POST /api/author/course_templates/{course_id}/enrollments
+        # Called from subaccount
+        endpoint = f'author/course_templates/{course_id}/enrollments'
+        
+        logger.debug(f"Enrolling user {user_id} in course {course_id} (subaccount: {subdomain})")
+        
+        self._request(
+            'post',
+            endpoint,
+            subdomain=subdomain,  # Call from subaccount
+            json={
+                'enrollments': [{
+                    'user_id': int(user_id)  # Bridge expects integer
+                }]
+            }
+        )
+    
+    def enroll_user_in_courses_batch(self, subdomain, user_id, course_ids):
+        """
+        Enroll a user in multiple courses.
+        
+        Note: This calls the course-specific enrollment endpoint for each course.
+        The Bridge API endpoint enrolls multiple users in ONE course, so we
+        need to call it once per course for our single user.
+        
+        Args:
+            subdomain: Subaccount subdomain
+            user_id: Bridge user ID (from subaccount)
+            course_ids: List of Bridge course template IDs
+            
+        Returns:
+            tuple: (enrolled_count, failed_count)
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        if not course_ids:
+            return 0, 0
+        
+        enrolled_count = 0
+        failed_count = 0
+        total_courses = len(course_ids)
+        
+        logger.info(f"Enrolling user {user_id} in {total_courses} courses (subaccount: {subdomain})...")
+        
+        for idx, course_id in enumerate(course_ids, 1):
+            try:
+                self.enroll_user_in_course(subdomain, user_id, course_id)
+                enrolled_count += 1
+                if idx % 25 == 0 or idx == total_courses:
+                    logger.info(f"  Progress: {idx}/{total_courses} courses processed ({enrolled_count} enrolled, {failed_count} failed)...")
+            except BridgeAPIError as e:
+                failed_count += 1
+                logger.warning(f"  Failed to enroll user {user_id} in course {course_id}: {str(e)}")
+        
+        logger.info(f"✓ Enrollment complete: {enrolled_count} enrolled, {failed_count} failed (out of {total_courses} courses)")
+        return enrolled_count, failed_count
+    
+    def list_roles(self, subdomain):
+        """
+        List all available roles in a subaccount.
+        
+        Note: Bridge API may not expose a roles listing endpoint. This method
+        tries multiple endpoints and returns empty list if none work.
+        
+        Args:
+            subdomain: Subaccount subdomain (or None for root account)
+            
+        Returns:
+            list: List of role dictionaries with 'id' and 'name' keys
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        # Try different endpoints
+        endpoints_to_try = [
+            'admin/roles',
+            'author/roles',
+            'roles',
+        ]
+        
+        for endpoint in endpoints_to_try:
+            try:
+                logger.debug(f"Trying to list roles from endpoint: {endpoint} (subdomain: {subdomain})")
+                response = self._request('get', endpoint, subdomain=subdomain)
+                roles = response.get('roles', [])
+                if roles:
+                    logger.debug(f"Found {len(roles)} roles from {endpoint}")
+                    return roles
+            except BridgeAPIError as e:
+                logger.debug(f"Endpoint {endpoint} failed: {str(e)}")
+                continue
+            except Exception as e:
+                logger.debug(f"Endpoint {endpoint} error: {str(e)}")
+                continue
+        
+        # If all endpoints failed, try root account
+        if subdomain:
+            try:
+                logger.debug("Trying to list roles from root account")
+                for endpoint in endpoints_to_try:
+                    try:
+                        response = self._request('get', endpoint, subdomain=None)
+                        roles = response.get('roles', [])
+                        if roles:
+                            logger.debug(f"Found {len(roles)} roles from root account ({endpoint})")
+                            return roles
+                    except:
+                        continue
+            except Exception as e:
+                logger.debug(f"Root account role listing failed: {str(e)}")
+        
+        logger.warning("Could not list roles from any endpoint - Bridge API may not expose this")
+        return []
+    
+    def get_role_by_name(self, subdomain, role_name):
+        """
+        Get a role ID by role name.
+        
+        Args:
+            subdomain: Subaccount subdomain
+            role_name: Name of the role (e.g., "Sub Account Administrator")
+            
+        Returns:
+            str: Role ID, or None if not found
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        roles = self.list_roles(subdomain)
+        if not roles:
+            # If we can't list roles, try root account
+            roles = self.list_roles(None)
+        
+        for role in roles:
+            if role.get('name') == role_name:
+                role_id = role.get('id')
+                logger.debug(f"Found role '{role_name}' with ID: {role_id}")
+                return role_id
+        
+        logger.warning(f"Role '{role_name}' not found")
+        return None
+    
+    def get_sub_account_admin_role_id(self):
+        """
+        Get the Sub Account Administrator role ID.
+        
+        This uses a known hardcoded role ID that is consistent across Bridge instances.
+        If role listing works, it will try to find it by name first.
+        
+        Returns:
+            str: Role ID for Sub Account Administrator
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        # Known role ID from previous implementations
+        # This is the standard "Sub Account Administrator" role ID in Bridge
+        SUB_ACCOUNT_ADMIN_ROLE_ID = "25fed615-b7e8-4190-af30-b7ade587d04b"
+        
+        return SUB_ACCOUNT_ADMIN_ROLE_ID
+    
+    def assign_user_roles(self, subdomain, user_id, role_ids):
+        """
+        Assign roles to a user in a subaccount.
+        
+        Args:
+            subdomain: Subaccount subdomain
+            user_id: Bridge user ID
+            role_ids: List of role IDs to assign (can be single role ID or list)
+            
+        Raises:
+            BridgeAPIError: If role assignment fails
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        # Ensure role_ids is a list
+        if not isinstance(role_ids, list):
+            role_ids = [role_ids]
+        
+        endpoint = f'admin/users/{user_id}/roles/batch'
+        logger.debug(f"Assigning roles {role_ids} to user {user_id} in subaccount {subdomain}")
+        
+        self._request(
+            'put',
+            endpoint,
+            subdomain=subdomain,
+            json={'roles': role_ids}
+        )
+        
+        logger.info(f"✓ Assigned {len(role_ids)} role(s) to user {user_id}")
+    
     def get_subaccount(self, subdomain):
         """
         Get subaccount information.
