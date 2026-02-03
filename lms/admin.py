@@ -5,15 +5,44 @@ import json
 from django.contrib import admin
 from django.http import JsonResponse
 from django.test import RequestFactory
+from django.urls import reverse
 from .models import (
-    OHSAccount, OHSAuth, OHSAccessLog, BridgeSyncTask, 
+    OHSAccount, OHSIAccount, HRIAccount, ILTAccount,
+    OHSAuth, OHSAccessLog, BridgeSyncTask, 
     OAuthAuthorizationCode, OAuthAccessToken, Course, Program, Package
 )
 from .views_sync import sync_existing_user_sso, sync_existing_users_batch
+from .forms import PrefixSelectForm
+
+
+class PrefixSelectionMixin:
+    """Mixin to add prefix selection dropdown to admin changelist."""
+    
+    def changelist_view(self, request, extra_context=None):
+        extra_context = extra_context or {}
+        selected_prefix = request.session.get('admin_prefix', '')
+        extra_context['prefix_select_form'] = PrefixSelectForm(
+            initial={'prefix': selected_prefix}
+        )
+        extra_context['set_prefix_url'] = reverse('set_prefix')
+        return super().changelist_view(request, extra_context=extra_context)
+    
+    def get_queryset(self, request):
+        qs = super().get_queryset(request)
+        selected_prefix = request.session.get('admin_prefix')
+        if selected_prefix:
+            # For models with account relationship, filter through that
+            if hasattr(self.model, 'account'):
+                # Filter by account's prefix
+                qs = qs.filter(account__prefix=selected_prefix)
+            elif hasattr(self.model, 'prefix'):
+                # Direct prefix field
+                qs = qs.filter(prefix=selected_prefix)
+        return qs
 
 
 @admin.register(OHSAccount)
-class OHSAccountAdmin(admin.ModelAdmin):
+class OHSAccountAdmin(PrefixSelectionMixin, admin.ModelAdmin):
     list_display = ['unique_id', 'user_email', 'first_name', 'last_name', 'prefix', 'unique_url', 'is_active', 'created_at']
     list_filter = ['prefix', 'is_active', 'created_at']
     search_fields = ['unique_id', 'user_email', 'first_name', 'last_name', 'unique_url', 'bridge_subaccount_id']
@@ -100,7 +129,7 @@ class OHSAccountAdmin(admin.ModelAdmin):
 
 
 @admin.register(OHSAuth)
-class OHSAuthAdmin(admin.ModelAdmin):
+class OHSAuthAdmin(PrefixSelectionMixin, admin.ModelAdmin):
     list_display = ['name', 'client_id', 'is_active', 'created_at']
     list_filter = ['is_active', 'created_at']
     readonly_fields = ['client_id', 'client_secret', 'created_at']
@@ -126,7 +155,7 @@ class BridgeSyncTaskAdmin(admin.ModelAdmin):
 
 
 @admin.register(OAuthAuthorizationCode)
-class OAuthAuthorizationCodeAdmin(admin.ModelAdmin):
+class OAuthAuthorizationCodeAdmin(PrefixSelectionMixin, admin.ModelAdmin):
     list_display = ['code', 'account', 'client_id', 'used', 'created_at', 'expires_at']
     list_filter = ['used', 'created_at', 'expires_at']
     search_fields = ['code', 'account__unique_id', 'account__user_email']
@@ -135,7 +164,7 @@ class OAuthAuthorizationCodeAdmin(admin.ModelAdmin):
 
 
 @admin.register(OAuthAccessToken)
-class OAuthAccessTokenAdmin(admin.ModelAdmin):
+class OAuthAccessTokenAdmin(PrefixSelectionMixin, admin.ModelAdmin):
     list_display = ['token', 'account', 'client_id', 'created_at', 'expires_at']
     list_filter = ['created_at', 'expires_at']
     search_fields = ['token', 'account__unique_id', 'account__user_email']

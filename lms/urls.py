@@ -2,7 +2,7 @@
 URL configuration for OHS Insider LMS app.
 """
 from django.urls import path
-from . import views, views_openid, views_sync
+from . import views, views_openid, views_sync, views_admin
 
 urlpatterns = [
     # Authentication endpoints

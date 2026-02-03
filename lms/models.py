@@ -60,11 +60,36 @@ class OHSAccount(models.Model):
     class Meta:
         db_table = 'ohs_account'
         ordering = ['unique_id']
-        verbose_name = 'OHS Account'
-        verbose_name_plural = 'OHS Accounts'
+        verbose_name = 'Account'
+        verbose_name_plural = 'Accounts'
     
     def __str__(self):
         return f"{self.unique_id} - {self.user_email}"
+
+
+# Proxy models for separate admin sections
+class OHSIAccount(OHSAccount):
+    """Proxy model for OHSI accounts only."""
+    class Meta:
+        proxy = True
+        verbose_name = 'OHSI Account'
+        verbose_name_plural = 'OHSI Accounts'
+
+
+class HRIAccount(OHSAccount):
+    """Proxy model for HRI accounts only."""
+    class Meta:
+        proxy = True
+        verbose_name = 'HRI Account'
+        verbose_name_plural = 'HRI Accounts'
+
+
+class ILTAccount(OHSAccount):
+    """Proxy model for ILT accounts only."""
+    class Meta:
+        proxy = True
+        verbose_name = 'ILT Account'
+        verbose_name_plural = 'ILT Accounts'
 
 
 class OHSAuth(models.Model):
@@ -98,8 +123,8 @@ class OHSAuth(models.Model):
     
     class Meta:
         db_table = 'ohs_auth'
-        verbose_name = 'OHS Authentication'
-        verbose_name_plural = 'OHS Authentications'
+        verbose_name = 'Authentication'
+        verbose_name_plural = 'Authentications'
     
     def __str__(self):
         return f"{self.name} - {self.client_id}"
@@ -139,8 +164,8 @@ class OAuthAuthorizationCode(models.Model):
     
     class Meta:
         db_table = 'oauth_authorization_code'
-        verbose_name = 'OAuth Authorization Code'
-        verbose_name_plural = 'OAuth Authorization Codes'
+        verbose_name = 'Authorization Code'
+        verbose_name_plural = 'Authorization Codes'
     
     def __str__(self):
         return f"{self.code} - {self.account.unique_id}"
@@ -158,8 +183,8 @@ class OAuthAccessToken(models.Model):
     
     class Meta:
         db_table = 'oauth_access_token'
-        verbose_name = 'OAuth Access Token'
-        verbose_name_plural = 'OAuth Access Tokens'
+        verbose_name = 'Access Token'
+        verbose_name_plural = 'Access Tokens'
     
     def __str__(self):
         return f"{self.token} - {self.account.unique_id}"
