@@ -1,0 +1,35 @@
+version: '3.8'
+
+# Production docker-compose for AWS deployment
+# Uses RDS PostgreSQL and ElastiCache Redis (external services)
+
+services:
+  web:
+    build: .
+    command: >
+      sh -c "
+      python manage.py migrate --noinput &&
+      python manage.py collectstatic --noinput &&
+      gunicorn --bind 0.0.0.0:8000 --workers 3 --timeout 120 --access-logfile - --error-logfile - ohsinsider.wsgi:application
+      "
+    volumes:
+      - static_volume:/app/staticfiles
+      - logs_volume:/app/logs
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - DJANGO_SETTINGS_MODULE=ohsinsider.settings_production
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  static_volume:
+  logs_volume:
+

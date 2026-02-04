@@ -19,9 +19,24 @@ from django.utils import timezone
 from datetime import timedelta
 
 # Initialize Redis connection (optional - can use database instead)
+# Support both standard Redis and Redis Cluster Mode
 try:
-    r = redis.Redis(**settings.REDIS)
-except:
+    if getattr(settings, 'REDIS_CLUSTER_MODE', False):
+        from redis.cluster import RedisCluster
+        from redis.connection import ConnectionPool
+        startup_nodes = [{"host": settings.REDIS['host'], "port": settings.REDIS['port']}]
+        r = RedisCluster(
+            startup_nodes=startup_nodes,
+            decode_responses=False,
+            ssl=settings.REDIS.get('ssl', True),
+            ssl_cert_reqs=settings.REDIS.get('ssl_cert_reqs', 'required'),
+        )
+    else:
+        r = redis.Redis(**settings.REDIS)
+except Exception as e:
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.warning(f"Redis connection failed: {e}. Using database fallback.")
     r = None
 
 

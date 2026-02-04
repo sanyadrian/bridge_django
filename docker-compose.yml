@@ -1,0 +1,76 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ohsinsider_bridge}
+      POSTGRES_USER: ${POSTGRES_USER:-ohsinsider}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ohsinsider}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  web:
+    build: .
+    # Use gunicorn in production, runserver in development
+    command: >
+      sh -c "
+      if [ \"$$DEBUG\" = \"False\" ]; then
+        python manage.py migrate --noinput &&
+        python manage.py collectstatic --noinput &&
+        gunicorn --bind 0.0.0.0:8000 --workers 3 --timeout 120 --access-logfile - --error-logfile - ohsinsider.wsgi:application
+      else
+        python manage.py migrate &&
+        python manage.py runserver 0.0.0.0:8000
+      fi
+      "
+    volumes:
+      - .:/app
+      - static_volume:/app/staticfiles
+      - logs_volume:/app/logs
+    ports:
+      - "8000:8000"
+    environment:
+      - DEBUG=${DEBUG:-True}
+      - DJANGO_SETTINGS_MODULE=${DJANGO_SETTINGS_MODULE:-ohsinsider.settings}
+      - SECRET_KEY=${SECRET_KEY}
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-ohsinsider}:${POSTGRES_PASSWORD:-changeme}@db:5432/${POSTGRES_DB:-ohsinsider_bridge}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - BRIDGE_API_KEY=${BRIDGE_API_KEY}
+      - BRIDGE_API_SECRET=${BRIDGE_API_SECRET}
+      - OHS_BRIDGE_BASE_URL=${OHS_BRIDGE_BASE_URL:-https://safetynow.bridgeapp.com}
+      - ALLOWED_HOSTS=${ALLOWED_HOSTS:-localhost,127.0.0.1}
+      - CSRF_TRUSTED_ORIGINS=${CSRF_TRUSTED_ORIGINS:-}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  static_volume:
+  logs_volume:
+
