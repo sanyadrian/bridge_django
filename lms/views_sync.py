@@ -97,12 +97,21 @@ def sync_user_to_bridge(request):
         data_copy.pop('signature', None)
         data_string = urlencode(sorted(data_copy.items()), doseq=True)
         
+        # DEBUG: Log signature verification details
+        logger.info(f"=== SIGNATURE DEBUG ===")
+        logger.info(f"Data string for verification: {data_string}")
+        logger.info(f"Received signature: {signature}")
+        
         # Verify signature
         expected_signature = hmac.new(
             auth.client_secret.encode('utf-8'),
             data_string.encode('utf-8'),
             hashlib.sha256
         ).hexdigest()
+        
+        logger.info(f"Expected signature: {expected_signature}")
+        logger.info(f"Client secret used: {auth.client_secret[:8]}...")
+        logger.info(f"=== END SIGNATURE DEBUG ===")
         
         if signature != expected_signature:
             return JsonResponse({'error': 'Invalid signature'}, status=403)
