@@ -727,6 +727,112 @@ def create_bridge_subaccount(request):
             logger.warning("Continuing despite user creation failure - user can be created later")
             # Don't fail the whole process, user can be created later
         
+        # Step 10b: Assign "Sub Account Administrator" role to user
+        if bridge_user and bridge_user.get('id'):
+            logger.info("Step 10b: Assigning 'Sub Account Administrator' role to user...")
+            try:
+                role_names_to_try = [
+                    "Sub Account Administrator",
+                    "Sub Account Admin",
+                    "SubAccount Administrator",
+                    "SubAccount Admin"
+                ]
+                
+                role_id = None
+                found_role_name = None
+                
+                for role_name in role_names_to_try:
+                    role_id = bridge_api.get_role_by_name(subaccount_subdomain, role_name)
+                    if role_id:
+                        found_role_name = role_name
+                        break
+                
+                # If role listing doesn't work, use hardcoded role ID
+                if not role_id:
+                    logger.info("  Role listing not available, using known Sub Account Administrator role ID")
+                    role_id = bridge_api.get_sub_account_admin_role_id()
+                    found_role_name = "Sub Account Administrator (by ID)"
+                
+                if role_id:
+                    bridge_api.assign_user_roles(
+                        subdomain=subaccount_subdomain,
+                        user_id=bridge_user.get('id'),
+                        role_ids=[role_id]
+                    )
+                    logger.info(f"✓ Successfully assigned '{found_role_name}' role to user")
+                else:
+                    logger.warning(f"✗ Could not determine Sub Account Administrator role ID")
+            except Exception as role_error:
+                logger.error(f"✗ Failed to assign role to user: {str(role_error)}")
+                # Don't fail the whole process; role can be assigned manually
+        
+        # Step 10c: Assign package courses and programs to subaccount
+        if subaccount and subaccount.get('id'):
+            subaccount_id = subaccount.get('id')
+            logger.info(f"Step 10c: Assigning package courses/programs to subaccount (ID: {subaccount_id})...")
+            try:
+                # Find package by prefix
+                package = Package.objects.filter(prefix=prefix, active=True).order_by('id').first()
+                if not package:
+                    logger.warning(f"No active package found for prefix '{prefix}' - skipping course assignment")
+                else:
+                    courses = list(package.courses.filter(active=True).values_list('bridge_id', flat=True))
+                    programs = list(package.programs.filter(active=True).values_list('bridge_id', flat=True))
+                    logger.info(f"Found package: {package.name} with {len(courses)} courses and {len(programs)} programs")
+                    
+                    def _chunks(items, size):
+                        for i in range(0, len(items), size):
+                            yield items[i:i + size]
+                    
+                    BATCH_SIZE = 25
+                    
+                    # Share courses
+                    if courses:
+                        course_affiliations = [
+                            {'item_type': 'CourseTemplate', 'item_id': str(cid), 'domain_id': str(subaccount_id)}
+                            for cid in courses
+                        ]
+                        batch_num = 0
+                        total_batches = (len(course_affiliations) + BATCH_SIZE - 1) // BATCH_SIZE
+                        courses_assigned = 0
+                        
+                        for batch in _chunks(course_affiliations, BATCH_SIZE):
+                            batch_num += 1
+                            logger.info(f"  Sharing courses batch {batch_num}/{total_batches} ({len(batch)} courses)...")
+                            try:
+                                bridge_api.set_affiliations_batch(batch, on=True)
+                                courses_assigned += len(batch)
+                            except BridgeAPIError as batch_error:
+                                logger.warning(f"  Batch {batch_num} failed: {str(batch_error)}")
+                        
+                        logger.info(f"✓ Shared {courses_assigned}/{len(courses)} courses to subaccount")
+                    
+                    # Share programs
+                    if programs:
+                        program_affiliations = [
+                            {'item_type': 'LearningPath', 'item_id': str(pid), 'domain_id': str(subaccount_id)}
+                            for pid in programs
+                        ]
+                        batch_num = 0
+                        total_batches = (len(program_affiliations) + BATCH_SIZE - 1) // BATCH_SIZE
+                        programs_assigned = 0
+                        
+                        for batch in _chunks(program_affiliations, BATCH_SIZE):
+                            batch_num += 1
+                            logger.info(f"  Sharing programs batch {batch_num}/{total_batches} ({len(batch)} programs)...")
+                            try:
+                                bridge_api.set_affiliations_batch(batch, on=True)
+                                programs_assigned += len(batch)
+                            except BridgeAPIError as batch_error:
+                                logger.warning(f"  Batch {batch_num} failed: {str(batch_error)}")
+                        
+                        logger.info(f"✓ Shared {programs_assigned}/{len(programs)} programs to subaccount")
+                    
+                    logger.info("✓ Package assignment complete")
+            except Exception as package_error:
+                logger.error(f"✗ Failed to assign package: {str(package_error)}")
+                # Don't fail the whole process; can be assigned manually
+        
         # Store the full subdomain for Bridge API calls
         # subaccount_subdomain is like "ohsi-adrianov-safetynow" - this is what Bridge expects
         logger.info("Step 11: Preparing subaccount ID for storage...")
