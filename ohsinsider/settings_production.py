@@ -19,11 +19,11 @@ SECRET_KEY = config('SECRET_KEY', default=os.environ.get('SECRET_KEY'))
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = config('DEBUG', default=False, cast=bool)
 
-# Allowed hosts
-ALLOWED_HOSTS = config('ALLOWED_HOSTS', cast=Csv(), default=[])
+# Allowed hosts - your production domain
+ALLOWED_HOSTS = config('ALLOWED_HOSTS', cast=Csv(), default=['bridgeadmin1.safetynow.com'])
 
-# CSRF trusted origins
-CSRF_TRUSTED_ORIGINS = config('CSRF_TRUSTED_ORIGINS', cast=Csv(), default=[])
+# CSRF trusted origins - your production domain with https
+CSRF_TRUSTED_ORIGINS = config('CSRF_TRUSTED_ORIGINS', cast=Csv(), default=['https://bridgeadmin1.safetynow.com'])
 
 # Database - Use PostgreSQL in production
 DATABASES = {
