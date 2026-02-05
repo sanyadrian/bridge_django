@@ -20,10 +20,30 @@ SECRET_KEY = config('SECRET_KEY', default=os.environ.get('SECRET_KEY'))
 DEBUG = config('DEBUG', default=False, cast=bool)
 
 # Allowed hosts - your production domain
-ALLOWED_HOSTS = config('ALLOWED_HOSTS', cast=Csv(), default=['bridgeadmin1.safetynow.com'])
+ALLOWED_HOSTS = config(
+    'ALLOWED_HOSTS',
+    cast=Csv(),
+    default=[
+        'bridgeadmin1.safetynow.com',
+        '54.224.65.225',
+        'localhost',
+        '127.0.0.1',
+        '0.0.0.0'
+    ]
+)
+
+SECURE_SSL_REDIRECT = False
+SESSION_COOKIE_SECURE = False
+CSRF_COOKIE_SECURE = False
+
 
 # CSRF trusted origins - your production domain with https
-CSRF_TRUSTED_ORIGINS = config('CSRF_TRUSTED_ORIGINS', cast=Csv(), default=['https://bridgeadmin1.safetynow.com'])
+# CSRF_TRUSTED_ORIGINS = config('CSRF_TRUSTED_ORIGINS', cast=Csv(), default=['https://bridgeadmin1.safetynow.com'])
+CSRF_TRUSTED_ORIGINS = [
+    'http://bridgeadmin1.safetynow.com',
+    'http://54.224.65.225',
+]
+
 
 # Database - Use PostgreSQL in production
 DATABASES = {
@@ -42,9 +62,9 @@ STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 MIDDLEWARE.insert(1, 'whitenoise.middleware.WhiteNoiseMiddleware')
 
 # Security settings
-SECURE_SSL_REDIRECT = config('SECURE_SSL_REDIRECT', default=True, cast=bool)
-SESSION_COOKIE_SECURE = config('SESSION_COOKIE_SECURE', default=True, cast=bool)
-CSRF_COOKIE_SECURE = config('CSRF_COOKIE_SECURE', default=True, cast=bool)
+# SECURE_SSL_REDIRECT = config('SECURE_SSL_REDIRECT', default=True, cast=bool)
+# SESSION_COOKIE_SECURE = config('SESSION_COOKIE_SECURE', default=True, cast=bool)
+# CSRF_COOKIE_SECURE = config('CSRF_COOKIE_SECURE', default=True, cast=bool)
 SECURE_BROWSER_XSS_FILTER = True
 SECURE_CONTENT_TYPE_NOSNIFF = True
 X_FRAME_OPTIONS = 'DENY'
