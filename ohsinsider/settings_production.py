@@ -60,7 +60,8 @@ MIDDLEWARE.insert(1, 'whitenoise.middleware.WhiteNoiseMiddleware')
 
 # Security settings
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
-SECURE_SSL_REDIRECT = config('SECURE_SSL_REDIRECT', default=True, cast=bool)
+USE_X_FORWARDED_HOST = True
+# SECURE_SSL_REDIRECT = config('SECURE_SSL_REDIRECT', default=True, cast=bool)
 SESSION_COOKIE_SECURE = config('SESSION_COOKIE_SECURE', default=True, cast=bool)
 CSRF_COOKIE_SECURE = config('CSRF_COOKIE_SECURE', default=True, cast=bool)
 SECURE_BROWSER_XSS_FILTER = True
@@ -181,7 +182,7 @@ LOGGING = {
 CONN_MAX_AGE = 600  # Database connection pooling
 
 # FORCE disable HTTPS redirect (temporary)
-# SECURE_SSL_REDIRECT = False
+SECURE_SSL_REDIRECT = False
 # SECURE_PROXY_SSL_HEADER = None
 # USE_X_FORWARDED_HOST = False
 
