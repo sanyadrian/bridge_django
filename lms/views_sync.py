@@ -727,12 +727,10 @@ def create_bridge_subaccount(request):
             logger.warning("Continuing despite user creation failure - user can be created later")
             # Don't fail the whole process, user can be created later
         
-        # Extract subaccount_id (without -safetynow suffix) for mapping
-        # subaccount_subdomain is like "ohsi-adrianov-safetynow"
-        # subaccount_id should be "ohsi-adrianov" (or "ohsi-adrianov-1" if duplicate)
-        logger.info("Step 11: Extracting subaccount ID for mapping...")
-        subaccount_id = subaccount_subdomain.replace('-safetynow', '')
-        logger.info(f"Subaccount ID (for mapping): {subaccount_id}")
+        # Store the full subdomain for Bridge API calls
+        # subaccount_subdomain is like "ohsi-adrianov-safetynow" - this is what Bridge expects
+        logger.info("Step 11: Preparing subaccount ID for storage...")
+        logger.info(f"Full subaccount subdomain: {subaccount_subdomain}")
         
         # Create or update OHSAccount record
         logger.info("Step 12: Creating/updating OHSAccount record...")
@@ -742,7 +740,7 @@ def create_bridge_subaccount(request):
                 'user_email': email,
                 'first_name': first_name,
                 'last_name': last_name,
-                'bridge_subaccount_id': subaccount_id,
+                'bridge_subaccount_id': subaccount_subdomain,  # Store FULL subdomain
                 'company_name': company_name,
                 'is_active': True
             }
@@ -756,7 +754,7 @@ def create_bridge_subaccount(request):
             account.user_email = email
             account.first_name = first_name
             account.last_name = last_name
-            account.bridge_subaccount_id = subaccount_id
+            account.bridge_subaccount_id = subaccount_subdomain  # Store FULL subdomain
             account.company_name = company_name
             account.is_active = True
             if bridge_user:
@@ -769,13 +767,12 @@ def create_bridge_subaccount(request):
         logger.info("=" * 80)
         logger.info(f"SUCCESS: Subaccount creation completed for {email}")
         logger.info(f"  - Subaccount: {subaccount_subdomain}")
-        logger.info(f"  - Subaccount ID: {subaccount_id}")
         logger.info(f"  - Full URL: https://{subaccount_subdomain}.bridgeapp.com")
         logger.info("=" * 80)
         
         return JsonResponse({
             'success': True,
-            'subaccount_id': subaccount_id,
+            'subaccount_id': subaccount_subdomain,  # Full subdomain for Bridge API
             'subaccount_subdomain': subaccount_subdomain,
             'full_url': f'https://{subaccount_subdomain}.bridgeapp.com',
             'message': f'Subaccount {subaccount_subdomain} created and SSO configured'
