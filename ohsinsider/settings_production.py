@@ -32,9 +32,6 @@ ALLOWED_HOSTS = config(
     ]
 )
 
-SECURE_SSL_REDIRECT = False
-SESSION_COOKIE_SECURE = False
-CSRF_COOKIE_SECURE = False
 
 
 # CSRF trusted origins - your production domain with https
@@ -182,3 +179,10 @@ LOGGING = {
 # Performance optimizations
 CONN_MAX_AGE = 600  # Database connection pooling
 
+# FORCE disable HTTPS redirect (temporary)
+SECURE_SSL_REDIRECT = False
+SECURE_PROXY_SSL_HEADER = None
+USE_X_FORWARDED_HOST = False
+
+SESSION_COOKIE_SECURE = False
+CSRF_COOKIE_SECURE = False
