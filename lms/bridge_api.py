@@ -779,7 +779,7 @@ class BridgeAPI:
                 json={"auth": auth_config}
             )
             logger.info(f"✓ SSO configuration successful for {subdomain}")
-            logger.debug(f"Response: {json.dumps(response, indent=2) if response else 'No response body'}")
+            logger.info(f"PATCH Response (full): {json.dumps(response, indent=2) if response else 'No response body'}")
             
             # Verify SSO was actually configured by fetching it back
             try:
@@ -788,7 +788,8 @@ class BridgeAPI:
                     'config/sub_account/auth',
                     subdomain=subdomain
                 )
-                logger.info(f"✓ Verified SSO config: {json.dumps(verify_response.get('auth', {}), indent=2)}")
+                logger.info(f"GET Verify Response (full): {json.dumps(verify_response, indent=2)}")
+                logger.info(f"✓ Verified SSO config auth section: {json.dumps(verify_response.get('auth', {}), indent=2)}")
             except Exception as verify_error:
                 logger.warning(f"Could not verify SSO config: {str(verify_error)}")
             
