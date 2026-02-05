@@ -105,9 +105,10 @@ class BridgeAPI:
                     logger.error(f"Bridge API error - Code: {error_code}, Title: {error_title}, Detail: {error_detail}")
                     
                     # Handle specific error cases
-                    if error_code in ('taken', 'unique_violation'):
+                    # Check both code and title for "taken" (Bridge returns error_0 with "Subdomain has already been taken")
+                    if error_code in ('taken', 'unique_violation') or 'already been taken' in error_title.lower() or 'subdomain' in error_title.lower() and 'taken' in error_title.lower():
                         raise BridgeSubaccountExists(f"Subaccount already exists: {error_title}") from e
-                    elif error_code == 'not_unique':
+                    elif error_code == 'not_unique' or 'not unique' in error_title.lower():
                         raise BridgeUserExists(f"User already exists: {error_title}") from e
                     
                     raise BridgeAPIError(f"Bridge API error: {error_title} (Detail: {error_detail})") from e
