@@ -1231,6 +1231,12 @@ def sync_existing_users_batch(request):
                 return JsonResponse({'error': 'unique_ids must be a list'}, status=400)
             accounts = list(OHSAccount.objects.filter(unique_id__in=unique_ids))
             logger.info(f"Syncing SSO for {len(accounts)} accounts (requested {len(unique_ids)})")
+            
+            # Log which unique_ids were not found
+            if len(accounts) < len(unique_ids):
+                found_ids = set(a.unique_id for a in accounts)
+                missing_ids = [uid for uid in unique_ids if uid not in found_ids]
+                logger.warning(f"Missing {len(missing_ids)} accounts - unique_ids not found: {missing_ids[:10]}{'...' if len(missing_ids) > 10 else ''}")
         else:
             return JsonResponse({'error': 'Must provide account_ids, unique_ids, or all=true'}, status=400)
         
