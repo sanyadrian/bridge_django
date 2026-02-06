@@ -155,40 +155,41 @@ def authenticate_user(request, unique_id):
     Creates Django user if needed and logs them in for OIDC flow.
     """
     try:
-        # URL decode the unique_id (Django might decode + as space, or we might have encoded characters)
         from urllib.parse import unquote
-        # Django URL routing automatically decodes, but + might be decoded as space
-        # So we need to handle both the original and URL-decoded versions
-        decoded_unique_id = unquote(unique_id.replace(' ', '+'))  # Replace spaces back to + if needed
+        logger = logging.getLogger(__name__)
         
-        # Try to find account with the decoded unique_id
         account = None
-        try:
-            account = OHSAccount.objects.get(unique_id=decoded_unique_id, is_active=True)
-        except OHSAccount.DoesNotExist:
-            # Try with the original unique_id as well (in case it wasn't encoded)
+        email = request.GET.get('email')
+        
+        # FIRST: Try by email (since we now use email as unique_id)
+        # This is the primary lookup method
+        if email:
             try:
-                account = OHSAccount.objects.get(unique_id=unique_id, is_active=True)
+                account = OHSAccount.objects.get(unique_id=email, is_active=True)
+                logger.info(f"Found account by email as unique_id: {email}")
             except OHSAccount.DoesNotExist:
-                # Try with space replaced by + (in case Django decoded + as space)
+                # Also try by user_email field
                 try:
-                    account = OHSAccount.objects.get(unique_id=unique_id.replace(' ', '+'), is_active=True)
+                    account = OHSAccount.objects.get(user_email=email, is_active=True)
+                    logger.info(f"Found account by user_email field: {email}")
                 except OHSAccount.DoesNotExist:
-                    # Last try: try with + replaced by space
-                    try:
-                        account = OHSAccount.objects.get(unique_id=unique_id.replace('+', ' '), is_active=True)
-                    except OHSAccount.DoesNotExist:
-                        # Fallback: try by email (for existing users)
-                        email = request.GET.get('email')
-                        if email:
-                            try:
-                                account = OHSAccount.objects.get(user_email=email, is_active=True)
-                                logger = logging.getLogger(__name__)
-                                logger.info(f"Found account by email fallback: {email}")
-                            except OHSAccount.DoesNotExist:
-                                pass
-                            except OHSAccount.MultipleObjectsReturned:
-                                pass
+                    pass
+                except OHSAccount.MultipleObjectsReturned:
+                    # If multiple, get the first one
+                    account = OHSAccount.objects.filter(user_email=email, is_active=True).first()
+                    logger.info(f"Found account by user_email (multiple existed): {email}")
+        
+        # FALLBACK: Try by original unique_id (for backwards compatibility)
+        if not account:
+            decoded_unique_id = unquote(unique_id.replace(' ', '+'))
+            
+            for try_id in [decoded_unique_id, unique_id, unique_id.replace(' ', '+'), unique_id.replace('+', ' ')]:
+                try:
+                    account = OHSAccount.objects.get(unique_id=try_id, is_active=True)
+                    logger.info(f"Found account by unique_id: {try_id}")
+                    break
+                except OHSAccount.DoesNotExist:
+                    continue
         
         if not account:
             # Log the attempted unique_id for debugging
