@@ -990,9 +990,17 @@ def import_users_from_plugin(request):
                     except:
                         pass
                 
-                # Create or update account
+                # Use EMAIL as the primary identifier (unique_id field)
+                # This allows multiple users to share the same subaccount
+                # Store original unique_id for reference (in logs)
+                original_unique_id = unique_id
+                unique_id_for_storage = email  # Use email as unique_id
+                
+                logger.info(f"Importing user: email={email}, original_unique_id={original_unique_id}")
+                
+                # Create or update account using EMAIL as unique_id
                 account, created = OHSAccount.objects.update_or_create(
-                    unique_id=unique_id,
+                    unique_id=unique_id_for_storage,  # Use email as unique_id
                     defaults={
                         'user_email': email,
                         'first_name': first_name,
@@ -1007,16 +1015,18 @@ def import_users_from_plugin(request):
                 
                 if created:
                     results['created'].append({
-                        'unique_id': unique_id,
-                        'email': email
+                        'unique_id': unique_id_for_storage,
+                        'email': email,
+                        'original_unique_id': original_unique_id
                     })
-                    logger.info(f"✓ Created account: {unique_id} ({email})")
+                    logger.info(f"✓ Created account: {email} (original: {original_unique_id})")
                 else:
                     results['updated'].append({
-                        'unique_id': unique_id,
-                        'email': email
+                        'unique_id': unique_id_for_storage,
+                        'email': email,
+                        'original_unique_id': original_unique_id
                     })
-                    logger.info(f"✓ Updated account: {unique_id} ({email})")
+                    logger.info(f"✓ Updated account: {email} (original: {original_unique_id})")
                     
             except Exception as e:
                 results['failed'].append({
@@ -1230,17 +1240,25 @@ def sync_existing_users_batch(request):
             if not isinstance(unique_ids, list):
                 return JsonResponse({'error': 'unique_ids must be a list'}, status=400)
             
-            # Normalize unique_ids: convert spaces to + (same as import does)
-            normalized_ids = [uid.replace(' ', '+') for uid in unique_ids]
+            # Note: unique_ids are now emails (since we use email as unique_id)
+            # Also try lookup by email field for backwards compatibility
+            accounts = list(OHSAccount.objects.filter(unique_id__in=unique_ids))
             
-            accounts = list(OHSAccount.objects.filter(unique_id__in=normalized_ids))
+            # If not found by unique_id, try by email
+            if len(accounts) < len(unique_ids):
+                found_ids = set(a.unique_id for a in accounts)
+                missing_ids = [uid for uid in unique_ids if uid not in found_ids]
+                # Try to find by email for missing ones
+                email_accounts = list(OHSAccount.objects.filter(user_email__in=missing_ids))
+                accounts.extend(email_accounts)
+            
             logger.info(f"Syncing SSO for {len(accounts)} accounts (requested {len(unique_ids)})")
             
             # Log which unique_ids were not found
             if len(accounts) < len(unique_ids):
-                found_ids = set(a.unique_id for a in accounts)
-                missing_ids = [uid for uid in normalized_ids if uid not in found_ids]
-                logger.warning(f"Missing {len(missing_ids)} accounts - unique_ids not found: {missing_ids[:10]}{'...' if len(missing_ids) > 10 else ''}")
+                found_ids = set(a.unique_id for a in accounts) | set(a.user_email for a in accounts)
+                missing_ids = [uid for uid in unique_ids if uid not in found_ids]
+                logger.warning(f"Missing {len(missing_ids)} accounts - not found: {missing_ids[:10]}{'...' if len(missing_ids) > 10 else ''}")
         else:
             return JsonResponse({'error': 'Must provide account_ids, unique_ids, or all=true'}, status=400)
         
