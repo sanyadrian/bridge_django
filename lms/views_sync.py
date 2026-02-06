@@ -990,9 +990,13 @@ def import_users_from_plugin(request):
                     except:
                         pass
                 
-                # Create or update account
+                # Use EMAIL as unique_id to allow multiple users per subaccount
+                # Store original unique_id for reference
+                original_unique_id = unique_id
+                
+                # Create or update account using EMAIL as unique_id
                 account, created = OHSAccount.objects.update_or_create(
-                    unique_id=unique_id,
+                    unique_id=email,  # Use email as unique_id
                     defaults={
                         'user_email': email,
                         'first_name': first_name,
@@ -1007,16 +1011,16 @@ def import_users_from_plugin(request):
                 
                 if created:
                     results['created'].append({
-                        'unique_id': unique_id,
+                        'unique_id': email,
                         'email': email
                     })
-                    logger.info(f"✓ Created account: {unique_id} ({email})")
+                    logger.info(f"✓ Created account: {email} (original_id: {original_unique_id})")
                 else:
                     results['updated'].append({
-                        'unique_id': unique_id,
+                        'unique_id': email,
                         'email': email
                     })
-                    logger.info(f"✓ Updated account: {unique_id} ({email})")
+                    logger.info(f"✓ Updated account: {email} (original_id: {original_unique_id})")
                     
             except Exception as e:
                 results['failed'].append({
@@ -1230,17 +1234,15 @@ def sync_existing_users_batch(request):
             if not isinstance(unique_ids, list):
                 return JsonResponse({'error': 'unique_ids must be a list'}, status=400)
             
-            # Normalize unique_ids: convert spaces to + (same as import does)
-            normalized_ids = [uid.replace(' ', '+') for uid in unique_ids]
-            
-            accounts = list(OHSAccount.objects.filter(unique_id__in=normalized_ids))
+            # unique_ids are now emails (since we use email as unique_id)
+            accounts = list(OHSAccount.objects.filter(unique_id__in=unique_ids))
             logger.info(f"Syncing SSO for {len(accounts)} accounts (requested {len(unique_ids)})")
             
-            # Log which unique_ids were not found
+            # Log which were not found
             if len(accounts) < len(unique_ids):
                 found_ids = set(a.unique_id for a in accounts)
-                missing_ids = [uid for uid in normalized_ids if uid not in found_ids]
-                logger.warning(f"Missing {len(missing_ids)} accounts - unique_ids not found: {missing_ids[:10]}{'...' if len(missing_ids) > 10 else ''}")
+                missing_ids = [uid for uid in unique_ids if uid not in found_ids]
+                logger.warning(f"Missing {len(missing_ids)} accounts - emails not found: {missing_ids[:10]}{'...' if len(missing_ids) > 10 else ''}")
         else:
             return JsonResponse({'error': 'Must provide account_ids, unique_ids, or all=true'}, status=400)
         
