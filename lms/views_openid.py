@@ -276,4 +276,6 @@ def userinfo(request):
         'sub': account.unique_id,  # OIDC standard subject identifier
     }
     
+    logger.info(f"Userinfo returning: sub={account.unique_id}, email={account.user_email}, name={account.first_name} {account.last_name}")
+    
     return JsonResponse(claims)
