@@ -48,6 +48,8 @@ class OHSAccountAdmin(PrefixSelectionMixin, admin.ModelAdmin):
     search_fields = ['unique_id', 'user_email', 'first_name', 'last_name', 'unique_url', 'bridge_subaccount_id']
     readonly_fields = ['created_at', 'updated_at']
     ordering = ['prefix', 'unique_id']
+    list_per_page = 50
+    show_full_result_count = False
     
     fieldsets = (
         ('Basic Information', {
