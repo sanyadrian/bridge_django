@@ -21,6 +21,30 @@ from .bridge_api import BridgeAPI, BridgeSubaccountExists, BridgeUserExists, Bri
 logger = logging.getLogger(__name__)
 
 
+def verify_signature_multi_auth(data, signature):
+    """
+    Verify HMAC signature by trying all active auth records.
+    Returns the matching OHSAuth object, or None if no match.
+    """
+    data_copy = data.copy()
+    data_copy.pop('signature', None)
+    data_string = urlencode(sorted(data_copy.items()), doseq=True)
+    
+    active_auths = OHSAuth.objects.filter(is_active=True)
+    for auth in active_auths:
+        expected_signature = hmac.new(
+            auth.client_secret.encode('utf-8'),
+            data_string.encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()
+        if signature == expected_signature:
+            logger.info(f"✓ Signature matched auth: {auth.name} (client_id={auth.client_id})")
+            return auth
+    
+    logger.error(f"✗ Signature did not match any of {active_auths.count()} active auth records")
+    return None
+
+
 def generate_subaccount_domain(company_name, prefix='ohsi', root_subdomain='safetynow'):
     """
     Generate a Bridge subaccount subdomain from company name.
@@ -76,11 +100,6 @@ def sync_user_to_bridge(request):
     logger = logging.getLogger(__name__)
     
     try:
-        # Get authentication credentials
-        auth = OHSAuth.objects.filter(is_active=True).first()
-        if not auth:
-            return JsonResponse({'error': 'No active authentication configured'}, status=500)
-        
         # Parse request data
         try:
             data = json.loads(request.body)
@@ -92,28 +111,9 @@ def sync_user_to_bridge(request):
         if not signature:
             return JsonResponse({'error': 'Missing signature'}, status=400)
         
-        # Create data string for verification (excluding signature)
-        data_copy = data.copy()
-        data_copy.pop('signature', None)
-        data_string = urlencode(sorted(data_copy.items()), doseq=True)
-        
-        # DEBUG: Log signature verification details
-        logger.info(f"=== SIGNATURE DEBUG ===")
-        logger.info(f"Data string for verification: {data_string}")
-        logger.info(f"Received signature: {signature}")
-        
-        # Verify signature
-        expected_signature = hmac.new(
-            auth.client_secret.encode('utf-8'),
-            data_string.encode('utf-8'),
-            hashlib.sha256
-        ).hexdigest()
-        
-        logger.info(f"Expected signature: {expected_signature}")
-        logger.info(f"Client secret used: {auth.client_secret[:8]}...")
-        logger.info(f"=== END SIGNATURE DEBUG ===")
-        
-        if signature != expected_signature:
+        # Try all active auth records to find the matching one
+        auth = verify_signature_multi_auth(data, signature)
+        if not auth:
             return JsonResponse({'error': 'Invalid signature'}, status=403)
         
         # Check timestamp (within 5 minutes)
@@ -517,16 +517,8 @@ def create_bridge_subaccount(request):
     logger.info(f"Request body length: {len(request.body)} bytes")
     
     try:
-        # Get authentication credentials
-        logger.info("Step 1: Getting authentication credentials...")
-        auth = OHSAuth.objects.filter(is_active=True).first()
-        if not auth:
-            logger.error("✗ No active authentication configured")
-            return JsonResponse({'error': 'No active authentication configured'}, status=500)
-        logger.info(f"✓ Found active auth: client_id={auth.client_id}")
-        
         # Parse request data
-        logger.info("Step 2: Parsing request data...")
+        logger.info("Step 1: Parsing request data...")
         try:
             data = json.loads(request.body)
             logger.info(f"✓ Parsed data keys: {list(data.keys())}")
@@ -538,32 +530,17 @@ def create_bridge_subaccount(request):
             return JsonResponse({'error': 'Invalid JSON'}, status=400)
         
         # Verify signature
-        logger.info("Step 3: Verifying signature...")
+        logger.info("Step 2: Verifying signature...")
         signature = data.get('signature')
         if not signature:
             logger.error("✗ Missing signature in request")
             return JsonResponse({'error': 'Missing signature'}, status=400)
         
-        # Create data string for verification (excluding signature)
-        data_copy = data.copy()
-        data_copy.pop('signature', None)
-        data_string = urlencode(sorted(data_copy.items()), doseq=True)
-        logger.debug(f"Data string for signature: {data_string}")
-        
-        # Verify signature
-        expected_signature = hmac.new(
-            auth.client_secret.encode('utf-8'),
-            data_string.encode('utf-8'),
-            hashlib.sha256
-        ).hexdigest()
-        
-        logger.debug(f"Received signature: {signature[:20]}...")
-        logger.debug(f"Expected signature: {expected_signature[:20]}...")
-        
-        if signature != expected_signature:
-            logger.error("✗ Signature verification FAILED")
+        # Try all active auth records to find the matching one
+        auth = verify_signature_multi_auth(data, signature)
+        if not auth:
             return JsonResponse({'error': 'Invalid signature'}, status=403)
-        logger.info("✓ Signature verification PASSED")
+        logger.info(f"✓ Matched auth: {auth.name} (client_id={auth.client_id})")
         
         # Check timestamp (within 5 minutes)
         logger.info("Step 4: Checking timestamp...")
@@ -1067,11 +1044,6 @@ def sync_existing_user_sso(request):
     logger = logging.getLogger(__name__)
     
     try:
-        # Get authentication credentials
-        auth = OHSAuth.objects.filter(is_active=True).first()
-        if not auth:
-            return JsonResponse({'error': 'No active authentication configured'}, status=500)
-        
         # Parse request data
         try:
             data = json.loads(request.body)
@@ -1100,6 +1072,13 @@ def sync_existing_user_sso(request):
         
         if not account:
             return JsonResponse({'error': 'Account not found'}, status=404)
+        
+        # Get authentication credentials - try to match by account prefix, fallback to first
+        auth = OHSAuth.objects.filter(is_active=True, name__icontains=account.prefix).first() if account.prefix else None
+        if not auth:
+            auth = OHSAuth.objects.filter(is_active=True).first()
+        if not auth:
+            return JsonResponse({'error': 'No active authentication configured'}, status=500)
         
         # Check if account has unique_url
         if not account.unique_url:
@@ -1206,16 +1185,16 @@ def sync_existing_users_batch(request):
     logger = logging.getLogger(__name__)
     
     try:
-        # Get authentication credentials
-        auth = OHSAuth.objects.filter(is_active=True).first()
-        if not auth:
-            return JsonResponse({'error': 'No active authentication configured'}, status=500)
-        
         # Parse request data
         try:
             data = json.loads(request.body)
         except json.JSONDecodeError:
             return JsonResponse({'error': 'Invalid JSON'}, status=400)
+        
+        # Get default auth (fallback)
+        default_auth = OHSAuth.objects.filter(is_active=True).first()
+        if not default_auth:
+            return JsonResponse({'error': 'No active authentication configured'}, status=500)
         
         # Get accounts to sync
         accounts = []
@@ -1301,13 +1280,17 @@ def sync_existing_users_batch(request):
                     })
                     continue
                 
-                # Configure SSO
+                # Configure SSO - use auth matching account prefix, or fallback to default
+                account_auth = OHSAuth.objects.filter(is_active=True, name__icontains=account.prefix).first() if account.prefix else None
+                if not account_auth:
+                    account_auth = default_auth
+                
                 try:
                     bridge_api.configure_sso(
                         subdomain=subdomain,
                         django_base_url=django_base_url,
-                        client_id=auth.client_id,
-                        client_secret=auth.client_secret,
+                        client_id=account_auth.client_id,
+                        client_secret=account_auth.client_secret,
                         login_attribute='email'
                     )
                     

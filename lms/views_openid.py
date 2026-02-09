@@ -93,8 +93,14 @@ def authorize(request):
                 # No session data and user not logged in - return error
                 return HttpResponseForbidden('User session not found. Please start from WordPress login.')
         
-        # Verify we have an active OHSAuth (for token endpoint later)
-        auth = OHSAuth.objects.filter(is_active=True).first()
+        # Find the matching OHSAuth by client_id, fallback to first active
+        auth = OHSAuth.objects.filter(is_active=True, client_id=client_id).first()
+        if not auth:
+            # Fallback: try matching by account prefix
+            if hasattr(account, 'prefix') and account.prefix:
+                auth = OHSAuth.objects.filter(is_active=True, name__icontains=account.prefix).first()
+            if not auth:
+                auth = OHSAuth.objects.filter(is_active=True).first()
         if not auth:
             return HttpResponseBadRequest('Authentication not configured')
         

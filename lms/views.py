@@ -73,11 +73,6 @@ def wordpress_login_notification(request):
     Handle login notifications from OHS Insider WordPress.
     """
     try:
-        # Get authentication credentials
-        auth = OHSAuth.objects.filter(is_active=True).first()
-        if not auth:
-            return HttpResponseBadRequest('No active authentication configured')
-        
         # Parse the request data
         data = json.loads(request.body)
         
@@ -86,19 +81,10 @@ def wordpress_login_notification(request):
         if not signature:
             return HttpResponseBadRequest('Missing signature')
         
-        # Create the data string for verification
-        data_copy = data.copy()
-        data_copy.pop('signature', None)
-        data_string = urlencode(data_copy, doseq=True)
-        
-        # Verify signature
-        expected_signature = hmac.new(
-            auth.client_secret.encode('utf-8'),
-            data_string.encode('utf-8'),
-            hashlib.sha256
-        ).hexdigest()
-        
-        if signature != expected_signature:
+        # Try all active auth records to find the matching one
+        from .views_sync import verify_signature_multi_auth
+        auth = verify_signature_multi_auth(data, signature)
+        if not auth:
             return HttpResponseBadRequest('Invalid signature')
         
         # Check timestamp (within 5 minutes)
