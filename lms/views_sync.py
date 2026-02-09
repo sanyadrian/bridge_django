@@ -30,6 +30,9 @@ def verify_signature_multi_auth(data, signature):
     data_copy.pop('signature', None)
     data_string = urlencode(sorted(data_copy.items()), doseq=True)
     
+    logger.info(f"Signature verification - data_string: {data_string}")
+    logger.info(f"Signature verification - received signature: {signature}")
+    
     active_auths = OHSAuth.objects.filter(is_active=True)
     for auth in active_auths:
         expected_signature = hmac.new(
@@ -37,6 +40,7 @@ def verify_signature_multi_auth(data, signature):
             data_string.encode('utf-8'),
             hashlib.sha256
         ).hexdigest()
+        logger.info(f"Trying auth '{auth.name}' (client_id={auth.client_id}, secret={auth.client_secret[:8]}...): expected={expected_signature}")
         if signature == expected_signature:
             logger.info(f"✓ Signature matched auth: {auth.name} (client_id={auth.client_id})")
             return auth
