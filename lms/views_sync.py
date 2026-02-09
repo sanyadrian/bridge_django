@@ -40,7 +40,7 @@ def verify_signature_multi_auth(data, signature):
             data_string.encode('utf-8'),
             hashlib.sha256
         ).hexdigest()
-        logger.info(f"Trying auth '{auth.name}' (client_id={auth.client_id}, secret={auth.client_secret[:8]}...): expected={expected_signature}")
+        logger.info(f"Trying auth '{auth.name}' (client_id={auth.client_id}, secret_len={len(auth.client_secret)}, secret_full={auth.client_secret}): expected={expected_signature}")
         if signature == expected_signature:
             logger.info(f"✓ Signature matched auth: {auth.name} (client_id={auth.client_id})")
             return auth
