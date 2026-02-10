@@ -40,7 +40,7 @@ def verify_signature_multi_auth(data, signature):
             data_string.encode('utf-8'),
             hashlib.sha256
         ).hexdigest()
-        logger.info(f"Trying auth '{auth.name}' (client_id={auth.client_id}, secret_len={len(auth.client_secret)}, secret_full={auth.client_secret}): expected={expected_signature}")
+        logger.info(f"Trying auth '{auth.name}' (client_id={auth.client_id}, secret_len={len(auth.client_secret)}): expected={expected_signature}")
         if signature == expected_signature:
             logger.info(f"✓ Signature matched auth: {auth.name} (client_id={auth.client_id})")
             return auth
@@ -747,10 +747,47 @@ def create_bridge_subaccount(request):
                 logger.error(f"✗ Failed to assign role to user: {str(role_error)}")
                 # Don't fail the whole process; role can be assigned manually
         
-        # Step 10c: Assign package courses and programs to subaccount
+        # Step 11: Create OHSAccount record EARLY so SSO login works while courses are being shared
+        logger.info("Step 11: Creating/updating OHSAccount record (before course sharing)...")
+        try:
+            account, created = OHSAccount.objects.get_or_create(
+                unique_id=email,
+                defaults={
+                    'user_email': email,
+                    'first_name': first_name,
+                    'last_name': last_name,
+                    'bridge_subaccount_id': subaccount_subdomain,
+                    'company_name': company_name,
+                    'is_active': True,
+                    'bridge_user_id': bridge_user.get('id') if bridge_user else None,
+                    'bridge_account_id': subaccount.get('id') if subaccount else None,
+                }
+            )
+            
+            if created:
+                logger.info(f"✓ Created new OHSAccount record for {email}")
+            else:
+                logger.info(f"Updating existing OHSAccount record for {email}")
+                account.user_email = email
+                account.first_name = first_name
+                account.last_name = last_name
+                account.bridge_subaccount_id = subaccount_subdomain
+                account.company_name = company_name
+                account.is_active = True
+                if bridge_user:
+                    account.bridge_user_id = bridge_user.get('id')
+                if subaccount:
+                    account.bridge_account_id = subaccount.get('id')
+                account.save()
+                logger.info(f"✓ Updated OHSAccount record")
+        except Exception as account_error:
+            logger.error(f"✗ Failed to create/update OHSAccount: {str(account_error)}")
+            # Continue anyway — course sharing should still proceed
+        
+        # Step 12: Assign package courses and programs to subaccount
         if subaccount and subaccount.get('id'):
             subaccount_id = subaccount.get('id')
-            logger.info(f"Step 10c: Assigning package courses/programs to subaccount (ID: {subaccount_id})...")
+            logger.info(f"Step 12: Assigning package courses/programs to subaccount (ID: {subaccount_id})...")
             try:
                 # Find package by prefix
                 package = Package.objects.filter(prefix=prefix, active=True).order_by('id').first()
@@ -813,43 +850,6 @@ def create_bridge_subaccount(request):
             except Exception as package_error:
                 logger.error(f"✗ Failed to assign package: {str(package_error)}")
                 # Don't fail the whole process; can be assigned manually
-        
-        # Store the full subdomain for Bridge API calls
-        # subaccount_subdomain is like "ohsi-adrianov-safetynow" - this is what Bridge expects
-        logger.info("Step 11: Preparing subaccount ID for storage...")
-        logger.info(f"Full subaccount subdomain: {subaccount_subdomain}")
-        
-        # Create or update OHSAccount record
-        logger.info("Step 12: Creating/updating OHSAccount record...")
-        account, created = OHSAccount.objects.get_or_create(
-            unique_id=email,  # Use email as unique_id since we don't have separate unique_id
-            defaults={
-                'user_email': email,
-                'first_name': first_name,
-                'last_name': last_name,
-                'bridge_subaccount_id': subaccount_subdomain,  # Store FULL subdomain
-                'company_name': company_name,
-                'is_active': True
-            }
-        )
-        
-        if created:
-            logger.info(f"✓ Created new OHSAccount record for {email}")
-        else:
-            logger.info(f"Updating existing OHSAccount record for {email}")
-            # Update existing account
-            account.user_email = email
-            account.first_name = first_name
-            account.last_name = last_name
-            account.bridge_subaccount_id = subaccount_subdomain  # Store FULL subdomain
-            account.company_name = company_name
-            account.is_active = True
-            if bridge_user:
-                account.bridge_user_id = bridge_user.get('id')
-            if subaccount:
-                account.bridge_account_id = subaccount.get('id')
-            account.save()
-            logger.info(f"✓ Updated OHSAccount record")
         
         logger.info("=" * 80)
         logger.info(f"SUCCESS: Subaccount creation completed for {email}")
