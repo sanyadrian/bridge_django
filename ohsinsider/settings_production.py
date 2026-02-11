@@ -64,6 +64,9 @@ USE_X_FORWARDED_HOST = True
 SECURE_SSL_REDIRECT = config('SECURE_SSL_REDIRECT', default=True, cast=bool)
 SESSION_COOKIE_SECURE = config('SESSION_COOKIE_SECURE', default=True, cast=bool)
 CSRF_COOKIE_SECURE = config('CSRF_COOKIE_SECURE', default=True, cast=bool)
+# SameSite=None is required for the OIDC flow: Django → Bridge → Django
+# The session cookie must survive the cross-domain redirect chain
+SESSION_COOKIE_SAMESITE = 'None'
 SECURE_BROWSER_XSS_FILTER = True
 SECURE_CONTENT_TYPE_NOSNIFF = True
 X_FRAME_OPTIONS = 'DENY'

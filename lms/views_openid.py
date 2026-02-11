@@ -101,25 +101,45 @@ def authorize(request):
             if account:
                 logger.info(f"OIDC authorize: found account by authenticated user email={request.user.email}")
         
-        # Fallback: extract Bridge subdomain from redirect_uri to identify the account
-        # redirect_uri looks like: https://hri-company-safetynow.bridgeapp.com/auth/oidc/callback
-        if not account and redirect_uri:
-            try:
-                from urllib.parse import urlparse
-                parsed = urlparse(redirect_uri)
-                hostname = parsed.hostname  # e.g., "hri-company-safetynow.bridgeapp.com"
-                if hostname and hostname.endswith('.bridgeapp.com'):
-                    subdomain = hostname.replace('.bridgeapp.com', '')  # e.g., "hri-company-safetynow"
-                    account = OHSAccount.objects.filter(bridge_subaccount_id=subdomain, is_active=True).first()
-                    if account:
-                        logger.info(f"OIDC authorize: found account by redirect_uri subdomain={subdomain}, account={account.unique_id}")
-                    else:
-                        logger.warning(f"OIDC authorize: no account found for subdomain={subdomain}")
-            except Exception as e:
-                logger.warning(f"OIDC authorize: failed to parse redirect_uri: {e}")
+        # Fallback: extract Bridge subdomain from Referer header or redirect_uri
+        # Bridge uses centralized auth: redirect_uri = https://auth.bridgeapp.com/oauth2/callback
+        # But the Referer header contains the actual subaccount URL:
+        #   Referer: https://hri-company-safetynow.bridgeapp.com/
+        if not account:
+            from urllib.parse import urlparse
+            
+            # Try Referer header first (most reliable for Bridge SSO)
+            referer = request.META.get('HTTP_REFERER', '')
+            if referer:
+                try:
+                    parsed = urlparse(referer)
+                    hostname = parsed.hostname
+                    if hostname and hostname.endswith('.bridgeapp.com') and hostname != 'auth.bridgeapp.com':
+                        subdomain = hostname.replace('.bridgeapp.com', '')
+                        account = OHSAccount.objects.filter(bridge_subaccount_id=subdomain, is_active=True).first()
+                        if account:
+                            logger.info(f"OIDC authorize: found account by Referer subdomain={subdomain}, account={account.unique_id}")
+                        else:
+                            logger.warning(f"OIDC authorize: no account found for Referer subdomain={subdomain}")
+                except Exception as e:
+                    logger.warning(f"OIDC authorize: failed to parse Referer: {e}")
+            
+            # Also try redirect_uri (in case Bridge uses per-subaccount callbacks)
+            if not account and redirect_uri:
+                try:
+                    parsed = urlparse(redirect_uri)
+                    hostname = parsed.hostname
+                    if hostname and hostname.endswith('.bridgeapp.com') and hostname != 'auth.bridgeapp.com':
+                        subdomain = hostname.replace('.bridgeapp.com', '')
+                        account = OHSAccount.objects.filter(bridge_subaccount_id=subdomain, is_active=True).first()
+                        if account:
+                            logger.info(f"OIDC authorize: found account by redirect_uri subdomain={subdomain}, account={account.unique_id}")
+                except Exception as e:
+                    logger.warning(f"OIDC authorize: failed to parse redirect_uri: {e}")
         
         if not account:
-            logger.error(f"OIDC authorize: could not identify user. session_account_id={account_id}, session_unique_id={unique_id}, redirect_uri={redirect_uri}, authenticated={request.user.is_authenticated}")
+            referer = request.META.get('HTTP_REFERER', 'none')
+            logger.error(f"OIDC authorize: could not identify user. session_account_id={account_id}, session_unique_id={unique_id}, redirect_uri={redirect_uri}, referer={referer}, authenticated={request.user.is_authenticated}")
             return HttpResponseForbidden('User session not found. Please start from WordPress login.')
         
         # Find the matching OHSAuth by client_id, fallback to first active
