@@ -234,6 +234,27 @@ class BridgeSyncTask(models.Model):
         return f"{self.get_task_type_display()} - {self.account.unique_id} - {self.get_status_display()}"
 
 
+class PendingOIDCLogin(models.Model):
+    """
+    Temporary record to track which user initiated an OIDC login.
+    Created in /auth/<unique_id>/ and consumed in /openid/authorize/.
+    This solves the cross-domain session cookie loss (Django → Bridge → Django).
+    """
+    account = models.ForeignKey(OHSAccount, on_delete=models.CASCADE)
+    ip_address = models.GenericIPAddressField(db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    consumed = models.BooleanField(default=False)
+    
+    class Meta:
+        db_table = 'pending_oidc_login'
+        ordering = ['-created_at']
+        verbose_name = 'Pending OIDC Login'
+        verbose_name_plural = 'Pending OIDC Logins'
+    
+    def __str__(self):
+        return f"{self.account.unique_id} - {self.ip_address} - {self.created_at}"
+
+
 class Course(models.Model):
     """
     Course from Bridge LMS.

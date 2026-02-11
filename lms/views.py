@@ -18,7 +18,7 @@ from django.utils.decorators import method_decorator
 from django.contrib.auth import login as auth_login
 from django.contrib.auth.models import User
 
-from .models import OHSAccount, OHSAuth, OHSAccessLog, BridgeSyncTask
+from .models import OHSAccount, OHSAuth, OHSAccessLog, BridgeSyncTask, PendingOIDCLogin
 
 
 def get_client_ip(request):
@@ -215,10 +215,29 @@ def authenticate_user(request, unique_id):
         auth_login(request, django_user)
         
         # Store account info in session for OIDC endpoint
-        # Also store in a way that persists across domain redirects
         request.session['ohs_account_id'] = account.id
         request.session['ohs_unique_id'] = account.unique_id
         request.session.save()  # Ensure session is saved
+        
+        # Also create a PendingOIDCLogin record as fallback
+        # Session cookies may not survive cross-domain redirects (Django → Bridge → Django)
+        # The pending login is matched by IP address in /openid/authorize/
+        client_ip = get_client_ip(request)
+        try:
+            # Clean up old pending logins for this IP (older than 5 min)
+            from django.utils import timezone
+            from datetime import timedelta
+            PendingOIDCLogin.objects.filter(
+                ip_address=client_ip,
+                created_at__lt=timezone.now() - timedelta(minutes=5)
+            ).delete()
+            # Mark any existing pending logins for this IP as consumed
+            PendingOIDCLogin.objects.filter(ip_address=client_ip, consumed=False).update(consumed=True)
+            # Create new pending login
+            PendingOIDCLogin.objects.create(account=account, ip_address=client_ip)
+            logger.info(f"Created PendingOIDCLogin for {account.unique_id} from IP {client_ip}")
+        except Exception as e:
+            logger.warning(f"Failed to create PendingOIDCLogin: {e}")
         
         # Build Bridge subaccount URL
         # All Bridge subaccounts follow the pattern: name-safetynow.bridgeapp.com
