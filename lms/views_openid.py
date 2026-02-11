@@ -40,6 +40,7 @@ except Exception as e:
     r = None
 
 
+@csrf_exempt
 def authorize(request):
     """
     OIDC Authorization endpoint.
@@ -144,14 +145,62 @@ def authorize(request):
                 except Exception as e:
                     logger.warning(f"OIDC authorize: failed to parse Referer: {e}")
         
+        # Check if user submitted the email login form (POST fallback)
+        if not account and request.method == 'POST':
+            login_email = request.POST.get('email', '').strip()
+            if login_email:
+                account = OHSAccount.objects.filter(user_email=login_email, is_active=True).first()
+                if not account:
+                    account = OHSAccount.objects.filter(unique_id=login_email, is_active=True).first()
+                if account:
+                    logger.info(f"OIDC authorize: found account by email form submission: {login_email}, account={account.unique_id}")
+                else:
+                    logger.warning(f"OIDC authorize: email form submitted but no account found for: {login_email}")
+        
+        # Final fallback: show email login form
         if not account:
+            from .views import get_client_ip
+            client_ip = get_client_ip(request)
             referer = request.META.get('HTTP_REFERER', 'none')
-            try:
-                client_ip
-            except NameError:
-                client_ip = get_client_ip(request)
-            logger.error(f"OIDC authorize: could not identify user. session_account_id={account_id}, session_unique_id={unique_id}, redirect_uri={redirect_uri}, referer={referer}, ip={client_ip}, authenticated={request.user.is_authenticated}")
-            return HttpResponseForbidden('User session not found. Please start from WordPress login.')
+            logger.warning(f"OIDC authorize: showing login form. session_account_id={account_id}, session_unique_id={unique_id}, ip={client_ip}, referer={referer}")
+            
+            # Preserve all OIDC parameters for the form POST
+            error_msg = ''
+            if request.method == 'POST' and request.POST.get('email'):
+                error_msg = '<p style="color:#c0392b;margin-top:10px;">Account not found. Please check your email and try again.</p>'
+            
+            login_form = f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>Bridge SSO Login</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f6fa; margin: 0; padding: 0; display: flex; justify-content: center; align-items: center; min-height: 100vh; }}
+        .card {{ background: white; border-radius: 12px; box-shadow: 0 2px 20px rgba(0,0,0,0.1); padding: 40px; max-width: 420px; width: 90%; }}
+        h2 {{ margin: 0 0 8px; color: #2c3e50; font-size: 22px; }}
+        p {{ color: #666; margin: 0 0 24px; font-size: 14px; }}
+        label {{ display: block; margin-bottom: 6px; font-weight: 600; color: #333; font-size: 14px; }}
+        input[type=email] {{ width: 100%; padding: 12px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 16px; box-sizing: border-box; transition: border-color 0.2s; }}
+        input[type=email]:focus {{ border-color: #3498db; outline: none; }}
+        button {{ width: 100%; padding: 12px; background: #3498db; color: white; border: none; border-radius: 8px; font-size: 16px; font-weight: 600; cursor: pointer; margin-top: 16px; transition: background 0.2s; }}
+        button:hover {{ background: #2980b9; }}
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h2>Sign in to Bridge</h2>
+        <p>Enter your email address to continue to your eLearning portal.</p>
+        <form method="POST" action="{request.get_full_path()}">
+            <label for="email">Email Address</label>
+            <input type="email" id="email" name="email" required autofocus placeholder="your.email@company.com" value="{request.POST.get('email', '') if request.method == 'POST' else ''}">
+            <button type="submit">Continue</button>
+            {error_msg}
+        </form>
+    </div>
+</body>
+</html>"""
+            from django.http import HttpResponse
+            return HttpResponse(login_form, status=200)
         
         # Find the matching OHSAuth by client_id, fallback to first active
         auth = OHSAuth.objects.filter(is_active=True, client_id=client_id).first()
