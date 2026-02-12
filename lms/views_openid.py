@@ -125,26 +125,6 @@ def authorize(request):
             except Exception as e:
                 logger.warning(f"OIDC authorize: PendingOIDCLogin lookup failed: {e}")
         
-        # Last resort: try Referer header (only works for single-user subaccounts)
-        if not account:
-            from urllib.parse import urlparse
-            referer = request.META.get('HTTP_REFERER', '')
-            if referer:
-                try:
-                    parsed = urlparse(referer)
-                    hostname = parsed.hostname
-                    if hostname and hostname.endswith('.bridgeapp.com') and hostname != 'auth.bridgeapp.com':
-                        subdomain = hostname.replace('.bridgeapp.com', '')
-                        # Only use Referer if there's exactly ONE account for this subaccount
-                        matching = OHSAccount.objects.filter(bridge_subaccount_id=subdomain, is_active=True)
-                        if matching.count() == 1:
-                            account = matching.first()
-                            logger.info(f"OIDC authorize: found single account by Referer subdomain={subdomain}, account={account.unique_id}")
-                        else:
-                            logger.warning(f"OIDC authorize: Referer subdomain={subdomain} has {matching.count()} accounts, cannot disambiguate")
-                except Exception as e:
-                    logger.warning(f"OIDC authorize: failed to parse Referer: {e}")
-        
         # Check if user submitted the email login form (POST fallback)
         if not account and request.method == 'POST':
             login_email = request.POST.get('email', '').strip()
