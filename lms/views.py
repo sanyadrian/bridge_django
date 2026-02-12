@@ -178,12 +178,17 @@ def authenticate_user(request, unique_id):
                     continue
         
         if not account:
-            # Log the attempted unique_id for debugging
-            logger = logging.getLogger(__name__)
-            logger.warning(f"Account not found for unique_id: {unique_id} (decoded: {decoded_unique_id})")
-            email = request.GET.get('email')
+            logger.warning(f"Account not found for unique_id: {unique_id}")
             if email:
                 logger.warning(f"Also tried email: {email}")
+            
+            # If a fallback_url was provided (user's Bridge unique_url), redirect there
+            # This allows unsynced users to use their regular Bridge login
+            fallback_url = request.GET.get('fallback_url')
+            if fallback_url and fallback_url.startswith('https://') and 'bridgeapp.com' in fallback_url:
+                logger.info(f"Redirecting unsynced user to fallback_url: {fallback_url}")
+                return HttpResponseRedirect(fallback_url)
+            
             return HttpResponseBadRequest(f'Account not found. unique_id: {unique_id}' + (f', email: {email}' if email else ''))
         
         # Log the access attempt
