@@ -807,4 +807,62 @@ class BridgeAPI:
                 except:
                     pass
             raise
+    
+    def remove_sso(self, subdomain):
+        """
+        Remove SSO/OAuth configuration from a subaccount, reverting to regular password login.
+        
+        Args:
+            subdomain: Subaccount subdomain (e.g., 'ohsi-company-safetynow')
+        
+        Returns:
+            Response data from Bridge API
+        
+        Raises:
+            BridgeAPIError: If SSO removal fails
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        logger.info(f"Removing SSO configuration from subaccount: {subdomain}")
+        
+        # Set auth config to empty/default (password-based login)
+        auth_config = {
+            "provider": "",
+            "subprovider": "",
+            "authorize_url": "",
+            "token_url": "",
+            "profile_url": "",
+            "scope": "",
+            "client_id": "",
+            "client_secret": "",
+            "login_attribute": "email",
+            "token_as_header": False,
+            "request_body_auth": False
+        }
+        
+        try:
+            response = self._request(
+                'patch',
+                'config/sub_account/auth',
+                subdomain=subdomain,
+                json={"auth": auth_config}
+            )
+            logger.info(f"✓ SSO configuration removed from {subdomain}")
+            
+            # Verify SSO was removed
+            try:
+                verify_response = self._request(
+                    'get',
+                    'config/sub_account/auth',
+                    subdomain=subdomain
+                )
+                logger.info(f"Verify after removal: {json.dumps(verify_response, indent=2)}")
+            except Exception as verify_error:
+                logger.warning(f"Could not verify SSO removal: {str(verify_error)}")
+            
+            return response
+        except BridgeAPIError as e:
+            logger.error(f"✗ Failed to remove SSO from subaccount {subdomain}: {str(e)}")
+            raise
 

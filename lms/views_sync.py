@@ -1347,3 +1347,164 @@ def sync_existing_users_batch(request):
             'error': f'Internal server error: {str(e)}'
         }, status=500)
 
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def unsync_users(request):
+    """
+    API endpoint to unsync users — removes SSO from their Bridge subaccount(s)
+    and deactivates their OHSAccount records in Django.
+    
+    Expected POST data:
+    {
+        "emails": ["user1@example.com", "user2@example.com"],
+        "timestamp": 1234567890,
+        "signature": "hmac_sha256_signature"
+    }
+    
+    This will:
+    1. Remove SSO configuration from the user's Bridge subaccount
+    2. Deactivate the OHSAccount record in Django
+    Users can then use regular Bridge login with their unique_url.
+    """
+    logger.info("=" * 80)
+    logger.info("OHS Bridge: unsync_users endpoint called")
+    
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Invalid JSON'}, status=400)
+    
+    # Verify signature
+    # WordPress signs with emails as comma-separated string, but sends array in body
+    signature = data.get('signature')
+    if not signature:
+        return JsonResponse({'error': 'Missing signature'}, status=400)
+    
+    emails = data.get('emails', [])
+    
+    # Build signature data matching WordPress format (emails as comma string)
+    sig_data = {
+        'emails': ','.join(emails) if isinstance(emails, list) else emails,
+        'timestamp': data.get('timestamp', 0)
+    }
+    sig_data_copy = sig_data.copy()
+    data_string = urlencode(sorted(sig_data_copy.items()), doseq=True)
+    
+    logger.info(f"Unsync signature verification - data_string: {data_string}")
+    logger.info(f"Unsync signature verification - received: {signature}")
+    
+    matched_auth = None
+    active_auths = OHSAuth.objects.filter(is_active=True)
+    for auth in active_auths:
+        expected = hmac.new(
+            auth.client_secret.encode('utf-8'),
+            data_string.encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()
+        if hmac.compare_digest(expected, signature):
+            matched_auth = auth
+            break
+    
+    if not matched_auth:
+        return JsonResponse({'error': 'Invalid signature'}, status=403)
+    
+    # Verify timestamp
+    timestamp = data.get('timestamp', 0)
+    current_time = time.time()
+    if abs(current_time - timestamp) > 300:
+        return JsonResponse({'error': 'Request expired'}, status=400)
+    if not emails:
+        return JsonResponse({'error': 'No emails provided'}, status=400)
+    
+    logger.info(f"Unsyncing {len(emails)} user(s)")
+    
+    results = {
+        'success': [],
+        'failed': [],
+        'not_found': []
+    }
+    
+    # Track which subaccounts we've already removed SSO from
+    # (multiple users may share a subaccount)
+    processed_subaccounts = set()
+    
+    try:
+        bridge_api = BridgeAPI(root_subdomain='safetynow')
+    except ValueError as e:
+        return JsonResponse({'error': f'Bridge API configuration error: {str(e)}'}, status=500)
+    
+    for email in emails:
+        email = email.strip()
+        
+        # Find all OHSAccount records for this email
+        accounts = OHSAccount.objects.filter(
+            user_email=email,
+            is_active=True
+        )
+        
+        if not accounts.exists():
+            # Also try by unique_id
+            accounts = OHSAccount.objects.filter(
+                unique_id=email,
+                is_active=True
+            )
+        
+        if not accounts.exists():
+            results['not_found'].append(email)
+            logger.warning(f"No active account found for: {email}")
+            continue
+        
+        for account in accounts:
+            try:
+                subdomain = account.bridge_subaccount_id
+                
+                # Remove SSO from Bridge subaccount (only once per subaccount)
+                if subdomain and subdomain not in processed_subaccounts:
+                    # Ensure -safetynow suffix
+                    full_subdomain = subdomain
+                    if '-safetynow' not in full_subdomain:
+                        full_subdomain = f"{full_subdomain}-safetynow"
+                    
+                    try:
+                        bridge_api.remove_sso(full_subdomain)
+                        processed_subaccounts.add(subdomain)
+                        logger.info(f"✓ Removed SSO from subaccount: {full_subdomain}")
+                    except BridgeAPIError as e:
+                        logger.error(f"✗ Failed to remove SSO from {full_subdomain}: {str(e)}")
+                        # Continue anyway — still deactivate the account
+                
+                # Deactivate the OHSAccount record
+                account.is_active = False
+                account.save()
+                logger.info(f"✓ Deactivated account: {account.unique_id} ({account.user_email})")
+                
+                results['success'].append({
+                    'email': account.user_email,
+                    'unique_id': account.unique_id,
+                    'subaccount': subdomain or 'N/A'
+                })
+                
+            except Exception as e:
+                logger.error(f"✗ Error unsyncing {account.user_email}: {str(e)}")
+                results['failed'].append({
+                    'email': account.user_email,
+                    'error': str(e)
+                })
+    
+    logger.info(f"Unsync complete: {len(results['success'])} success, {len(results['failed'])} failed, {len(results['not_found'])} not found")
+    logger.info("=" * 80)
+    
+    return JsonResponse({
+        'success': True,
+        'message': 'Unsync completed',
+        'summary': {
+            'total': len(emails),
+            'success': len(results['success']),
+            'failed': len(results['failed']),
+            'not_found': len(results['not_found']),
+            'subaccounts_cleared': len(processed_subaccounts)
+        },
+        'results': results
+    })
+

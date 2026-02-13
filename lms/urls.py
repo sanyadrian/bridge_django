@@ -21,6 +21,7 @@ urlpatterns = [
     path('api/import-users-from-plugin/', views_sync.import_users_from_plugin, name='import_users_from_plugin'),
     path('api/sync-existing-user-sso/', views_sync.sync_existing_user_sso, name='sync_existing_user_sso'),
     path('api/sync-existing-users-batch/', views_sync.sync_existing_users_batch, name='sync_existing_users_batch'),
+    path('api/unsync-users/', views_sync.unsync_users, name='unsync_users'),
     
     # Health check
     path('health/', views.health_check, name='health_check'),
