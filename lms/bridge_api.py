@@ -810,7 +810,12 @@ class BridgeAPI:
     
     def remove_sso(self, subdomain):
         """
-        Remove SSO/OAuth configuration from a subaccount, reverting to regular password login.
+        Remove SSO/OAuth configuration from a subaccount.
+        
+        Bridge API does not allow deleting auth config or setting it to null.
+        The only working approach is to PATCH OAuth2 with invalid/unreachable URLs,
+        which effectively disables SSO. Users visiting the subaccount will get a
+        Bridge error page and can use the direct password login URL instead.
         
         Args:
             subdomain: Subaccount subdomain (e.g., 'ohsi-company-safetynow')
@@ -826,96 +831,47 @@ class BridgeAPI:
         
         logger.info(f"Removing SSO configuration from subaccount: {subdomain}")
         
-        # First, GET the current auth config so we can see what we're working with
-        current_config = None
+        # Bridge requires a valid auth config with 'provider' key.
+        # DELETE, empty auths, and null auth all fail.
+        # The only working approach: PATCH OAuth2 pointing to an unreachable domain.
+        disabled_auth_config = {
+            "auth": {
+                "provider": "OAuth2",
+                "subprovider": "oauth2",
+                "client_id": "disabled",
+                "client_secret": "disabled",
+                "authorize_url": "https://disabled.invalid/authorize",
+                "token_url": "https://disabled.invalid/token",
+                "profile_url": "https://disabled.invalid/userinfo",
+                "scope": "openid",
+                "login_attribute": "email",
+                "token_as_header": True,
+                "request_body_auth": False
+            }
+        }
+        
         try:
-            current_config = self._request(
-                'get',
+            response = self._request(
+                'patch',
                 'config/sub_account/auth',
-                subdomain=subdomain
+                subdomain=subdomain,
+                json=disabled_auth_config
             )
-            logger.info(f"Current auth config: {json.dumps(current_config, indent=2)}")
-        except BridgeAPIError as e:
-            logger.warning(f"Could not get current auth config: {str(e)}")
-        
-        # Try multiple approaches to remove SSO
-        approaches = [
-            # Approach 1: DELETE the auth config entirely
-            {
-                'method': 'delete',
-                'description': 'DELETE config/sub_account/auth',
-                'kwargs': {}
-            },
-            # Approach 2: PATCH with empty auths array (response format uses "auths" array)
-            {
-                'method': 'patch',
-                'description': 'PATCH with empty auths array',
-                'kwargs': {'json': {"auths": []}}
-            },
-            # Approach 3: PATCH with null auth
-            {
-                'method': 'patch',
-                'description': 'PATCH with null auth',
-                'kwargs': {'json': {"auth": None}}
-            },
-            # Approach 4: PATCH OAuth2 with invalid/dummy URLs to effectively break SSO
-            # (users will see an error and fall back to password login)
-            {
-                'method': 'patch',
-                'description': 'PATCH OAuth2 with disabled URLs',
-                'kwargs': {'json': {"auth": {
-                    "provider": "OAuth2",
-                    "subprovider": "oauth2",
-                    "client_id": "disabled",
-                    "client_secret": "disabled",
-                    "authorize_url": "https://disabled.invalid/authorize",
-                    "token_url": "https://disabled.invalid/token",
-                    "profile_url": "https://disabled.invalid/userinfo",
-                    "scope": "openid",
-                    "login_attribute": "email",
-                    "token_as_header": True,
-                    "request_body_auth": False
-                }}}
-            },
-            # Approach 5: PUT with empty auth
-            {
-                'method': 'put',
-                'description': 'PUT with empty auth object',
-                'kwargs': {'json': {"auth": {}}}
-            },
-        ]
-        
-        last_error = None
-        for approach in approaches:
+            logger.info(f"✓ SSO disabled for {subdomain} (OAuth2 pointed to disabled.invalid)")
+            
+            # Verify
             try:
-                logger.info(f"Trying: {approach['description']}")
-                response = self._request(
-                    approach['method'],
+                verify_response = self._request(
+                    'get',
                     'config/sub_account/auth',
-                    subdomain=subdomain,
-                    **approach['kwargs']
+                    subdomain=subdomain
                 )
-                logger.info(f"✓ SSO removed from {subdomain} via: {approach['description']}")
-                logger.info(f"Response: {json.dumps(response, indent=2) if response else 'empty'}")
-                
-                # Verify
-                try:
-                    verify_response = self._request(
-                        'get',
-                        'config/sub_account/auth',
-                        subdomain=subdomain
-                    )
-                    logger.info(f"Verify after removal: {json.dumps(verify_response, indent=2)}")
-                except Exception as verify_error:
-                    logger.warning(f"Could not verify SSO removal: {str(verify_error)}")
-                
-                return response
-            except BridgeAPIError as e:
-                last_error = e
-                logger.warning(f"Approach '{approach['description']}' failed: {str(e)}")
-                continue
-        
-        # If all approaches failed, raise the last error
-        logger.error(f"✗ Failed to remove SSO from subaccount {subdomain} after trying all approaches")
-        raise last_error
+                logger.info(f"Verify after removal: {json.dumps(verify_response, indent=2)}")
+            except Exception as verify_error:
+                logger.warning(f"Could not verify SSO removal: {str(verify_error)}")
+            
+            return response
+        except BridgeAPIError as e:
+            logger.error(f"✗ Failed to remove SSO from subaccount {subdomain}: {str(e)}")
+            raise
 
