@@ -826,43 +826,45 @@ class BridgeAPI:
         
         logger.info(f"Removing SSO configuration from subaccount: {subdomain}")
         
-        # Set auth config to empty/default (password-based login)
-        auth_config = {
-            "provider": "",
-            "subprovider": "",
-            "authorize_url": "",
-            "token_url": "",
-            "profile_url": "",
-            "scope": "",
-            "client_id": "",
-            "client_secret": "",
-            "login_attribute": "email",
-            "token_as_header": False,
-            "request_body_auth": False
-        }
+        # Bridge requires 'provider' to be set. Try multiple approaches to revert to default auth.
+        # Approach 1: Set provider to "Bridge" (Bridge's default password-based auth)
+        auth_configs_to_try = [
+            {"provider": "Bridge"},
+            {"provider": "password"},
+            {"provider": "Password"},
+            {"provider": "bridge"},
+        ]
         
-        try:
-            response = self._request(
-                'patch',
-                'config/sub_account/auth',
-                subdomain=subdomain,
-                json={"auth": auth_config}
-            )
-            logger.info(f"✓ SSO configuration removed from {subdomain}")
-            
-            # Verify SSO was removed
+        last_error = None
+        for auth_config in auth_configs_to_try:
             try:
-                verify_response = self._request(
-                    'get',
+                logger.info(f"Trying to set auth provider to: {auth_config.get('provider')}")
+                response = self._request(
+                    'patch',
                     'config/sub_account/auth',
-                    subdomain=subdomain
+                    subdomain=subdomain,
+                    json={"auth": auth_config}
                 )
-                logger.info(f"Verify after removal: {json.dumps(verify_response, indent=2)}")
-            except Exception as verify_error:
-                logger.warning(f"Could not verify SSO removal: {str(verify_error)}")
-            
-            return response
-        except BridgeAPIError as e:
-            logger.error(f"✗ Failed to remove SSO from subaccount {subdomain}: {str(e)}")
-            raise
+                logger.info(f"✓ SSO configuration removed from {subdomain} (provider set to '{auth_config.get('provider')}')")
+                
+                # Verify SSO was removed
+                try:
+                    verify_response = self._request(
+                        'get',
+                        'config/sub_account/auth',
+                        subdomain=subdomain
+                    )
+                    logger.info(f"Verify after removal: {json.dumps(verify_response, indent=2)}")
+                except Exception as verify_error:
+                    logger.warning(f"Could not verify SSO removal: {str(verify_error)}")
+                
+                return response
+            except BridgeAPIError as e:
+                last_error = e
+                logger.warning(f"Provider '{auth_config.get('provider')}' failed: {str(e)}")
+                continue
+        
+        # If all approaches failed, raise the last error
+        logger.error(f"✗ Failed to remove SSO from subaccount {subdomain} after trying all provider values")
+        raise last_error
 
