@@ -826,28 +826,79 @@ class BridgeAPI:
         
         logger.info(f"Removing SSO configuration from subaccount: {subdomain}")
         
-        # Bridge requires 'provider' to be set. Try multiple approaches to revert to default auth.
-        # Approach 1: Set provider to "Bridge" (Bridge's default password-based auth)
-        auth_configs_to_try = [
-            {"provider": "Bridge"},
-            {"provider": "password"},
-            {"provider": "Password"},
-            {"provider": "bridge"},
+        # First, GET the current auth config so we can see what we're working with
+        current_config = None
+        try:
+            current_config = self._request(
+                'get',
+                'config/sub_account/auth',
+                subdomain=subdomain
+            )
+            logger.info(f"Current auth config: {json.dumps(current_config, indent=2)}")
+        except BridgeAPIError as e:
+            logger.warning(f"Could not get current auth config: {str(e)}")
+        
+        # Try multiple approaches to remove SSO
+        approaches = [
+            # Approach 1: DELETE the auth config entirely
+            {
+                'method': 'delete',
+                'description': 'DELETE config/sub_account/auth',
+                'kwargs': {}
+            },
+            # Approach 2: PATCH with empty auths array (response format uses "auths" array)
+            {
+                'method': 'patch',
+                'description': 'PATCH with empty auths array',
+                'kwargs': {'json': {"auths": []}}
+            },
+            # Approach 3: PATCH with null auth
+            {
+                'method': 'patch',
+                'description': 'PATCH with null auth',
+                'kwargs': {'json': {"auth": None}}
+            },
+            # Approach 4: PATCH OAuth2 with invalid/dummy URLs to effectively break SSO
+            # (users will see an error and fall back to password login)
+            {
+                'method': 'patch',
+                'description': 'PATCH OAuth2 with disabled URLs',
+                'kwargs': {'json': {"auth": {
+                    "provider": "OAuth2",
+                    "subprovider": "oauth2",
+                    "client_id": "disabled",
+                    "client_secret": "disabled",
+                    "authorize_url": "https://disabled.invalid/authorize",
+                    "token_url": "https://disabled.invalid/token",
+                    "profile_url": "https://disabled.invalid/userinfo",
+                    "scope": "openid",
+                    "login_attribute": "email",
+                    "token_as_header": True,
+                    "request_body_auth": False
+                }}}
+            },
+            # Approach 5: PUT with empty auth
+            {
+                'method': 'put',
+                'description': 'PUT with empty auth object',
+                'kwargs': {'json': {"auth": {}}}
+            },
         ]
         
         last_error = None
-        for auth_config in auth_configs_to_try:
+        for approach in approaches:
             try:
-                logger.info(f"Trying to set auth provider to: {auth_config.get('provider')}")
+                logger.info(f"Trying: {approach['description']}")
                 response = self._request(
-                    'patch',
+                    approach['method'],
                     'config/sub_account/auth',
                     subdomain=subdomain,
-                    json={"auth": auth_config}
+                    **approach['kwargs']
                 )
-                logger.info(f"✓ SSO configuration removed from {subdomain} (provider set to '{auth_config.get('provider')}')")
+                logger.info(f"✓ SSO removed from {subdomain} via: {approach['description']}")
+                logger.info(f"Response: {json.dumps(response, indent=2) if response else 'empty'}")
                 
-                # Verify SSO was removed
+                # Verify
                 try:
                     verify_response = self._request(
                         'get',
@@ -861,10 +912,10 @@ class BridgeAPI:
                 return response
             except BridgeAPIError as e:
                 last_error = e
-                logger.warning(f"Provider '{auth_config.get('provider')}' failed: {str(e)}")
+                logger.warning(f"Approach '{approach['description']}' failed: {str(e)}")
                 continue
         
         # If all approaches failed, raise the last error
-        logger.error(f"✗ Failed to remove SSO from subaccount {subdomain} after trying all provider values")
+        logger.error(f"✗ Failed to remove SSO from subaccount {subdomain} after trying all approaches")
         raise last_error
 
