@@ -810,12 +810,10 @@ class BridgeAPI:
     
     def remove_sso(self, subdomain):
         """
-        Remove SSO/OAuth configuration from a subaccount.
+        Remove SSO/OAuth configuration from a subaccount, reverting to password login.
         
-        Bridge API does not allow deleting auth config or setting it to null.
-        The only working approach is to PATCH OAuth2 with invalid/unreachable URLs,
-        which effectively disables SSO. Users visiting the subaccount will get a
-        Bridge error page and can use the direct password login URL instead.
+        Uses the same API call as Bridge admin's "Disable OAuth2 Authentication" button:
+        PATCH /api/learn/config/sub_account/auth with subprovider set to "basic".
         
         Args:
             subdomain: Subaccount subdomain (e.g., 'ohsi-company-safetynow')
@@ -831,39 +829,32 @@ class BridgeAPI:
         
         logger.info(f"Removing SSO configuration from subaccount: {subdomain}")
         
-        # Bridge requires a valid auth config with 'provider' key.
-        # DELETE, empty auths, and null auth all fail.
-        # The only working approach: PATCH OAuth2 pointing to an unreachable domain.
-        disabled_auth_config = {
+        # This is the exact payload Bridge admin UI sends when clicking
+        # "Disable OAuth2 Authentication". Setting subprovider to "basic"
+        # reverts the subaccount to password-based login.
+        disable_payload = {
             "auth": {
                 "provider": "OAuth2",
-                "subprovider": "oauth2",
-                "client_id": "disabled",
-                "client_secret": "disabled",
-                "authorize_url": "https://disabled.invalid/authorize",
-                "token_url": "https://disabled.invalid/token",
-                "profile_url": "https://disabled.invalid/userinfo",
-                "scope": "openid",
-                "login_attribute": "email",
-                "token_as_header": True,
-                "request_body_auth": False
+                "subprovider": "basic"
             }
         }
         
         try:
+            # Bridge admin uses /api/learn/config/sub_account/auth
+            # (note the "learn/" prefix in the path)
             response = self._request(
                 'patch',
-                'config/sub_account/auth',
+                'learn/config/sub_account/auth',
                 subdomain=subdomain,
-                json=disabled_auth_config
+                json=disable_payload
             )
-            logger.info(f"✓ SSO disabled for {subdomain} (OAuth2 pointed to disabled.invalid)")
+            logger.info(f"✓ SSO disabled for {subdomain} (subprovider set to 'basic')")
             
             # Verify
             try:
                 verify_response = self._request(
                     'get',
-                    'config/sub_account/auth',
+                    'learn/config/sub_account/auth',
                     subdomain=subdomain
                 )
                 logger.info(f"Verify after removal: {json.dumps(verify_response, indent=2)}")
