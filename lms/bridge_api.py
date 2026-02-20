@@ -724,6 +724,69 @@ class BridgeAPI:
         response = self._request('get', 'admin/sub_accounts', params={'limit': limit})
         return response.get('sub_accounts', [])
     
+    def get_sso_config(self, subdomain):
+        """
+        Get the current SSO/auth configuration for a subaccount.
+        
+        Returns:
+            dict with keys:
+                'has_sso': bool - whether any SSO is configured
+                'provider': str - 'OAuth2', 'SAML', or None
+                'subprovider': str - 'oauth2', 'basic', 'saml', etc.
+                'is_ours': bool - True if it's our OAuth2 config (matching client_id)
+                'client_id': str - the configured client_id (for OAuth2)
+                'raw': dict - full response from Bridge
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        result = {
+            'has_sso': False,
+            'provider': None,
+            'subprovider': None,
+            'is_ours': False,
+            'client_id': None,
+            'raw': {}
+        }
+        
+        try:
+            response = self._request('get', 'config/sub_account/auth', subdomain=subdomain)
+            result['raw'] = response
+            
+            auths = response.get('auths', [])
+            if not auths:
+                return result
+            
+            auth = auths[0]
+            provider = auth.get('provider', '')
+            subprovider = auth.get('subprovider', '')
+            config_client_id = auth.get('client_id', '')
+            
+            result['provider'] = provider
+            result['subprovider'] = subprovider
+            result['client_id'] = config_client_id
+            
+            # Check if SSO is actively configured (not just "basic" password login)
+            if provider and subprovider != 'basic':
+                result['has_sso'] = True
+            
+            # Check if it's our OAuth2 config by matching client_id against our auth records
+            if provider == 'OAuth2' and subprovider == 'oauth2' and config_client_id:
+                from .models import OHSAuth
+                our_auth = OHSAuth.objects.filter(client_id=config_client_id, is_active=True).first()
+                if our_auth:
+                    result['is_ours'] = True
+            
+            logger.info(f"SSO config for {subdomain}: provider={provider}, subprovider={subprovider}, "
+                        f"client_id={config_client_id}, has_sso={result['has_sso']}, is_ours={result['is_ours']}")
+            
+        except BridgeAPIError as e:
+            logger.warning(f"Could not read SSO config for {subdomain}: {str(e)}")
+        except Exception as e:
+            logger.warning(f"Error reading SSO config for {subdomain}: {str(e)}")
+        
+        return result
+
     def configure_sso(self, subdomain, django_base_url, client_id, client_secret, login_attribute='email'):
         """
         Configure SSO/OAuth for a subaccount.
@@ -808,6 +871,65 @@ class BridgeAPI:
                     pass
             raise
     
+    def list_subaccount_users(self, subdomain, limit=None):
+        """
+        List all users from a Bridge subaccount with pagination.
+        
+        Args:
+            subdomain: Subaccount subdomain
+            limit: Maximum number of users to return (None = all users)
+        
+        Returns:
+            List of user data dicts
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        users = []
+        url = None
+        params = {'limit': 100}
+        
+        page_count = 0
+        while True:
+            page_count += 1
+            try:
+                if url is None:
+                    response = self._request('get', 'admin/users', subdomain=subdomain, params=params)
+                else:
+                    response_obj = self.session.get(url, timeout=60)
+                    response_obj.raise_for_status()
+                    try:
+                        response = response_obj.json()
+                    except json.JSONDecodeError:
+                        logger.warning(f"Non-JSON response on page {page_count}")
+                        break
+                
+                user_list = response.get('users', [])
+                if not user_list:
+                    break
+                
+                users.extend(user_list)
+                logger.info(f"Page {page_count}: Fetched {len(user_list)} users from {subdomain} (total: {len(users)})")
+                
+                if limit and len(users) >= limit:
+                    break
+                
+                meta = response.get('meta', {})
+                next_url = meta.get('next')
+                if not next_url:
+                    break
+                
+                url = next_url
+                params = {}
+                
+            except Exception as e:
+                logger.error(f"Error fetching users page {page_count} from {subdomain}: {str(e)}")
+                break
+        
+        result = users[:limit] if limit else users
+        logger.info(f"✓ Fetched {len(result)} users from subaccount {subdomain} ({page_count} page(s))")
+        return result
+
     def remove_sso(self, subdomain):
         """
         Remove SSO/OAuth configuration from a subaccount, reverting to password login.

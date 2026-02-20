@@ -10,6 +10,7 @@ import logging
 from urllib.parse import urlencode
 
 from django.conf import settings
+from django.db import models
 from django.http import JsonResponse, HttpResponseBadRequest
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
@@ -207,38 +208,45 @@ def sync_user_to_bridge(request):
         if sso_needs_config and subaccount:
             logger.info(f"Configuring SSO for subaccount: {bridge_subaccount_id}")
             try:
-                # Get Django base URL from settings or request
-                django_base_url = getattr(settings, 'OHS_DJANGO_BASE_URL', None)
-                if not django_base_url:
-                    # Try to get from request
-                    django_base_url = request.build_absolute_uri('/').rstrip('/')
-                    # Remove the /api/sync-user-to-bridge/ part if present
-                    django_base_url = django_base_url.split('/api/')[0]
-                
-                logger.info(f"Django base URL: {django_base_url}")
-                logger.info(f"Client ID: {auth.client_id}")
-                logger.info(f"Client Secret: {'*' * len(auth.client_secret) if auth.client_secret else 'NOT SET'}")
-                
-                # Use auth credentials from the top of the function
-                if auth:
-                    bridge_api.configure_sso(
-                        subdomain=bridge_subaccount_id,
-                        django_base_url=django_base_url,
-                        client_id=auth.client_id,
-                        client_secret=auth.client_secret,
-                        login_attribute='email'
+                # Check if another SSO (e.g., SAML/Okta) is already configured
+                existing_sso = bridge_api.get_sso_config(bridge_subaccount_id)
+                if existing_sso['has_sso'] and not existing_sso['is_ours']:
+                    logger.warning(
+                        f"⚠ Subaccount {bridge_subaccount_id} already has {existing_sso['provider']} SSO "
+                        f"(not ours). Skipping SSO configuration to avoid disrupting existing SSO."
                     )
-                    logger.info(f"✓ Successfully configured SSO for subaccount: {bridge_subaccount_id}")
+                    sso_needs_config = False
                 else:
-                    logger.warning("No active auth found - SSO not configured")
+                    # Get Django base URL from settings or request
+                    django_base_url = getattr(settings, 'OHS_DJANGO_BASE_URL', None)
+                    if not django_base_url:
+                        # Try to get from request
+                        django_base_url = request.build_absolute_uri('/').rstrip('/')
+                        # Remove the /api/sync-user-to-bridge/ part if present
+                        django_base_url = django_base_url.split('/api/')[0]
+                    
+                    logger.info(f"Django base URL: {django_base_url}")
+                    logger.info(f"Client ID: {auth.client_id}")
+                    logger.info(f"Client Secret: {'*' * len(auth.client_secret) if auth.client_secret else 'NOT SET'}")
+                    
+                    # Use auth credentials from the top of the function
+                    if auth:
+                        bridge_api.configure_sso(
+                            subdomain=bridge_subaccount_id,
+                            django_base_url=django_base_url,
+                            client_id=auth.client_id,
+                            client_secret=auth.client_secret,
+                            login_attribute='email'
+                        )
+                        logger.info(f"✓ Successfully configured SSO for subaccount: {bridge_subaccount_id}")
+                    else:
+                        logger.warning("No active auth found - SSO not configured")
             except BridgeAPIError as sso_error:
                 logger.error(f"✗ Failed to configure SSO for {bridge_subaccount_id}: {str(sso_error)}")
                 logger.warning("Continuing despite SSO configuration failure - can be configured manually")
-                # Don't fail the whole process, but log the error
             except Exception as sso_error:
                 logger.error(f"✗ Unexpected error configuring SSO for {bridge_subaccount_id}: {str(sso_error)}")
                 logger.exception("Full traceback:")
-                # Don't fail the whole process, but log the error
         
         # Create or update user in Bridge subaccount
         # Use email as uid since we don't have unique_id
@@ -644,31 +652,38 @@ def create_bridge_subaccount(request):
         
         # Configure SSO automatically
         logger.info("Step 9: Configuring SSO for subaccount...")
-        django_base_url = getattr(settings, 'OHS_DJANGO_BASE_URL', None)
-        if not django_base_url:
-            # Try to get from request
-            django_base_url = request.build_absolute_uri('/').rstrip('/')
-            # Remove the /api/create-bridge-subaccount/ part if present
-            django_base_url = django_base_url.split('/api/')[0]
         
-        logger.info(f"Django base URL: {django_base_url}")
-        logger.info(f"Client ID: {auth.client_id}")
-        logger.info(f"Client Secret: {'*' * len(auth.client_secret) if auth.client_secret else 'NOT SET'}")
-        
-        try:
-            bridge_api.configure_sso(
-                subdomain=subaccount_subdomain,
-                django_base_url=django_base_url,
-                client_id=auth.client_id,
-                client_secret=auth.client_secret,
-                login_attribute='email'
+        # Check if another SSO provider (e.g., SAML/Okta) is already configured
+        sso_skipped = False
+        existing_sso = bridge_api.get_sso_config(subaccount_subdomain)
+        if existing_sso['has_sso'] and not existing_sso['is_ours']:
+            logger.warning(
+                f"⚠ Subaccount {subaccount_subdomain} already has {existing_sso['provider']} SSO "
+                f"(not ours). Skipping SSO configuration to avoid disrupting existing SSO."
             )
-            logger.info(f"✓ Successfully configured SSO for subaccount: {subaccount_subdomain}")
-        except BridgeAPIError as e:
-            logger.error(f"✗ Failed to configure SSO for {subaccount_subdomain}: {str(e)}")
-            logger.warning("Continuing despite SSO configuration failure - can be configured manually")
-            # Don't fail the whole process, but log the error
-            # SSO can be configured manually if needed
+            sso_skipped = True
+        else:
+            django_base_url = getattr(settings, 'OHS_DJANGO_BASE_URL', None)
+            if not django_base_url:
+                django_base_url = request.build_absolute_uri('/').rstrip('/')
+                django_base_url = django_base_url.split('/api/')[0]
+            
+            logger.info(f"Django base URL: {django_base_url}")
+            logger.info(f"Client ID: {auth.client_id}")
+            logger.info(f"Client Secret: {'*' * len(auth.client_secret) if auth.client_secret else 'NOT SET'}")
+            
+            try:
+                bridge_api.configure_sso(
+                    subdomain=subaccount_subdomain,
+                    django_base_url=django_base_url,
+                    client_id=auth.client_id,
+                    client_secret=auth.client_secret,
+                    login_attribute='email'
+                )
+                logger.info(f"✓ Successfully configured SSO for subaccount: {subaccount_subdomain}")
+            except BridgeAPIError as e:
+                logger.error(f"✗ Failed to configure SSO for {subaccount_subdomain}: {str(e)}")
+                logger.warning("Continuing despite SSO configuration failure - can be configured manually")
         
         # Create or update user in the subaccount
         # Use email as uid since we don't have unique_id
@@ -1113,11 +1128,26 @@ def sync_existing_user_sso(request):
         # Initialize Bridge API
         bridge_api = BridgeAPI()
         
+        # Check if another SSO provider is already configured
+        existing_sso = bridge_api.get_sso_config(subdomain)
+        if existing_sso['has_sso'] and not existing_sso['is_ours']:
+            logger.warning(
+                f"⚠ Subaccount {subdomain} already has {existing_sso['provider']} SSO (not ours). Skipping."
+            )
+            return JsonResponse({
+                'success': False,
+                'message': f"Subaccount already has {existing_sso['provider']} SSO configured (not ours). Skipped to avoid disruption.",
+                'data': {
+                    'account_id': account.id,
+                    'email': account.user_email,
+                    'subdomain': subdomain,
+                    'existing_provider': existing_sso['provider'],
+                }
+            })
+        
         # Configure SSO
         try:
-            # Get Django base URL from request
             django_base_url = request.build_absolute_uri('/').rstrip('/')
-            # Remove the /api/sync-existing-user-sso/ part if present
             django_base_url = django_base_url.split('/api/')[0]
             
             logger.info(f"Configuring SSO for subaccount: {subdomain}")
@@ -1169,6 +1199,76 @@ def sync_existing_user_sso(request):
         return JsonResponse({
             'error': f'Internal server error: {str(e)}'
         }, status=500)
+
+
+def import_subaccount_users_to_django(bridge_api, subdomain, prefix, unique_url):
+    """
+    Pull all users from a Bridge subaccount and create OHSAccount records
+    for any that don't already exist in Django.
+    
+    This ensures that ALL users on the subaccount can authenticate via SSO,
+    even if they weren't imported from WordPress.
+    """
+    try:
+        users = bridge_api.list_subaccount_users(subdomain)
+        if not users:
+            logger.info(f"No users found in subaccount {subdomain}")
+            return 0, 0
+        
+        logger.info(f"Found {len(users)} user(s) in Bridge subaccount {subdomain}, importing to Django...")
+        
+        created_count = 0
+        skipped_count = 0
+        
+        for user in users:
+            email = (user.get('email') or '').strip()
+            if not email:
+                continue
+            
+            existing = OHSAccount.objects.filter(
+                models.Q(unique_id=email) | models.Q(user_email=email),
+                is_active=True
+            ).first()
+            
+            if existing:
+                if not existing.bridge_subaccount_id:
+                    existing.bridge_subaccount_id = subdomain
+                    existing.unique_url = unique_url
+                    existing.save()
+                skipped_count += 1
+                continue
+            
+            try:
+                first_name = user.get('first_name') or ''
+                last_name = user.get('last_name') or ''
+                if not first_name and not last_name:
+                    full_name = user.get('full_name') or user.get('name') or ''
+                    parts = full_name.strip().split(' ', 1)
+                    first_name = parts[0] if parts else ''
+                    last_name = parts[1] if len(parts) > 1 else ''
+                
+                OHSAccount.objects.create(
+                    unique_id=email,
+                    user_email=email,
+                    first_name=first_name,
+                    last_name=last_name,
+                    bridge_subaccount_id=subdomain,
+                    unique_url=unique_url,
+                    prefix=prefix if prefix in ['ohsi', 'hri', 'ilt'] else None,
+                    is_active=True,
+                    bridge_user_id=user.get('id'),
+                )
+                created_count += 1
+                logger.info(f"  ✓ Imported subaccount user: {email}")
+            except Exception as e:
+                logger.warning(f"  ✗ Failed to import user {email}: {str(e)}")
+        
+        logger.info(f"✓ Import complete for {subdomain}: {created_count} created, {skipped_count} already existed")
+        return created_count, skipped_count
+        
+    except Exception as e:
+        logger.error(f"Error importing users from subaccount {subdomain}: {str(e)}")
+        return 0, 0
 
 
 @csrf_exempt
@@ -1245,6 +1345,10 @@ def sync_existing_users_batch(request):
             'skipped': []
         }
         
+        # Track subdomains we've already configured SSO on and imported users from
+        processed_subdomains = set()
+        total_imported = 0
+        
         for account in accounts:
             try:
                 # Check if account has unique_url
@@ -1290,13 +1394,48 @@ def sync_existing_users_batch(request):
                     account_auth = default_auth
                 
                 try:
-                    bridge_api.configure_sso(
-                        subdomain=subdomain,
-                        django_base_url=django_base_url,
-                        client_id=account_auth.client_id,
-                        client_secret=account_auth.client_secret,
-                        login_attribute='email'
-                    )
+                    # Only configure SSO once per subdomain
+                    if subdomain not in processed_subdomains:
+                        # Check if another SSO provider (e.g., SAML/Okta) is already configured.
+                        # If so, skip this subaccount entirely to avoid disrupting existing SSO.
+                        existing_sso = bridge_api.get_sso_config(subdomain)
+                        if existing_sso['has_sso'] and not existing_sso['is_ours']:
+                            logger.warning(
+                                f"⚠ Subaccount {subdomain} already has {existing_sso['provider']} SSO "
+                                f"(subprovider={existing_sso['subprovider']}, client_id={existing_sso['client_id']}). "
+                                f"Skipping to avoid disrupting existing SSO."
+                            )
+                            processed_subdomains.add(subdomain)
+                            results['skipped'].append({
+                                'account_id': account.id,
+                                'unique_id': account.unique_id,
+                                'email': account.user_email,
+                                'reason': f"Subaccount has existing {existing_sso['provider']} SSO (not ours)"
+                            })
+                            continue
+                        
+                        bridge_api.configure_sso(
+                            subdomain=subdomain,
+                            django_base_url=django_base_url,
+                            client_id=account_auth.client_id,
+                            client_secret=account_auth.client_secret,
+                            login_attribute='email'
+                        )
+                        logger.info(f"✓ Configured SSO for subdomain: {subdomain}")
+                        
+                        # Import ALL users from this Bridge subaccount into Django
+                        # so they can all authenticate via SSO (even if not on WordPress)
+                        created, skipped = import_subaccount_users_to_django(
+                            bridge_api=bridge_api,
+                            subdomain=subdomain,
+                            prefix=account.prefix,
+                            unique_url=account.unique_url
+                        )
+                        total_imported += created
+                        
+                        processed_subdomains.add(subdomain)
+                    else:
+                        logger.info(f"SSO already configured for {subdomain}, skipping duplicate")
                     
                     # Update bridge_subaccount_id if not set
                     if not account.bridge_subaccount_id:
@@ -1309,7 +1448,7 @@ def sync_existing_users_batch(request):
                         'email': account.user_email,
                         'subdomain': subdomain
                     })
-                    logger.info(f"✓ Configured SSO for {account.user_email} (subdomain: {subdomain})")
+                    logger.info(f"✓ SSO active for {account.user_email} (subdomain: {subdomain})")
                     
                 except BridgeAPIError as sso_error:
                     results['failed'].append({
@@ -1329,6 +1468,9 @@ def sync_existing_users_batch(request):
                 })
                 logger.error(f"✗ Error processing account {account.id}: {str(e)}")
         
+        logger.info(f"Batch SSO sync complete: {len(results['success'])} success, {len(results['failed'])} failed, {len(results['skipped'])} skipped")
+        logger.info(f"Processed {len(processed_subdomains)} unique subdomains, imported {total_imported} new subaccount users")
+        
         return JsonResponse({
             'success': True,
             'message': f'Batch SSO sync completed',
@@ -1336,7 +1478,9 @@ def sync_existing_users_batch(request):
                 'total': len(accounts),
                 'success': len(results['success']),
                 'failed': len(results['failed']),
-                'skipped': len(results['skipped'])
+                'skipped': len(results['skipped']),
+                'subdomains_processed': len(processed_subdomains),
+                'subaccount_users_imported': total_imported
             },
             'results': results
         })

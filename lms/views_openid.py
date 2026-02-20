@@ -40,6 +40,87 @@ except Exception as e:
     r = None
 
 
+def _try_auto_import_from_bridge(request, email, logger):
+    """
+    Try to auto-import a user from a Bridge subaccount into Django.
+    
+    When a subaccount admin creates a new user directly in Bridge after the
+    initial SSO sync, that user won't have an OHSAccount in Django.
+    This function detects the subaccount from the referer, looks up the user
+    in Bridge, and creates the OHSAccount on the fly.
+    
+    Returns the created OHSAccount, or None if user can't be found/imported.
+    """
+    try:
+        from .bridge_api import BridgeAPI
+        from urllib.parse import urlparse
+        
+        referer = request.META.get('HTTP_REFERER', '')
+        if not referer or 'bridgeapp.com' not in referer:
+            return None
+        
+        parsed = urlparse(referer)
+        subdomain = parsed.netloc.split('.')[0]
+        if not subdomain:
+            return None
+        
+        logger.info(f"Auto-import: checking Bridge subaccount {subdomain} for user {email}")
+        
+        # Determine prefix from subdomain
+        prefix = None
+        if subdomain.startswith('ohsi'):
+            prefix = 'ohsi'
+        elif subdomain.startswith('hri'):
+            prefix = 'hri'
+        elif subdomain.startswith('ilt'):
+            prefix = 'ilt'
+        
+        bridge_api = BridgeAPI(root_subdomain='safetynow')
+        bridge_user = bridge_api.get_user(subdomain, email)
+        
+        if not bridge_user:
+            logger.info(f"Auto-import: user {email} not found in Bridge subaccount {subdomain}")
+            return None
+        
+        first_name = bridge_user.get('first_name') or ''
+        last_name = bridge_user.get('last_name') or ''
+        if not first_name and not last_name:
+            full_name = bridge_user.get('full_name') or bridge_user.get('name') or ''
+            parts = full_name.strip().split(' ', 1)
+            first_name = parts[0] if parts else ''
+            last_name = parts[1] if len(parts) > 1 else ''
+        
+        unique_url = f"https://{subdomain}.bridgeapp.com"
+        
+        account, created = OHSAccount.objects.get_or_create(
+            unique_id=email,
+            defaults={
+                'user_email': email,
+                'first_name': first_name,
+                'last_name': last_name,
+                'bridge_subaccount_id': subdomain,
+                'unique_url': unique_url,
+                'prefix': prefix,
+                'is_active': True,
+                'bridge_user_id': bridge_user.get('id'),
+            }
+        )
+        
+        if created:
+            logger.info(f"Auto-import: created OHSAccount for {email} (Bridge user ID: {bridge_user.get('id')})")
+        else:
+            if not account.is_active:
+                account.is_active = True
+                account.save()
+            logger.info(f"Auto-import: OHSAccount already exists for {email} (reactivated: {not account.is_active})")
+        
+        return account
+        
+    except Exception as e:
+        logger.error(f"Auto-import failed for {email}: {str(e)}")
+        return None
+
+
 @csrf_exempt
 def authorize(request):
     """
@@ -135,7 +216,13 @@ def authorize(request):
                 if account:
                     logger.info(f"OIDC authorize: found account by email form submission: {login_email}, account={account.unique_id}")
                 else:
-                    logger.warning(f"OIDC authorize: email form submitted but no account found for: {login_email}")
+                    # Auto-import: user not in Django but might exist in Bridge subaccount
+                    # Extract subdomain from referer (Bridge subaccount URL)
+                    account = _try_auto_import_from_bridge(request, login_email, logger)
+                    if account:
+                        logger.info(f"OIDC authorize: auto-imported user from Bridge: {login_email}")
+                    else:
+                        logger.warning(f"OIDC authorize: email form submitted but no account found for: {login_email}")
         
         # Final fallback: show email login form
         if not account:
