@@ -41,7 +41,7 @@ except Exception as e:
     r = None
 
 
-def _try_auto_import_from_bridge(request, email, logger):
+def _try_auto_import_from_bridge(request, email, logger, subdomain_hint=None):
     """
     Try to auto-import a user from a Bridge subaccount into Django.
     
@@ -56,12 +56,13 @@ def _try_auto_import_from_bridge(request, email, logger):
         from .bridge_api import BridgeAPI
         from urllib.parse import urlparse
         
-        referer = request.META.get('HTTP_REFERER', '')
-        if not referer or 'bridgeapp.com' not in referer:
-            return None
-        
-        parsed = urlparse(referer)
-        subdomain = parsed.netloc.split('.')[0]
+        subdomain = (subdomain_hint or '').strip()
+        if not subdomain:
+            referer = request.META.get('HTTP_REFERER', '')
+            if not referer or 'bridgeapp.com' not in referer:
+                return None
+            parsed = urlparse(referer)
+            subdomain = parsed.netloc.split('.')[0]
         if not subdomain:
             return None
         
@@ -168,6 +169,25 @@ def authorize(request):
         logger = logging.getLogger(__name__)
         
         account = None
+        origin_subdomain = request.session.get('oidc_origin_subdomain', '')
+
+        # Capture original Bridge subaccount from the initial GET referer.
+        # On POST (email form submit), referer points to Django /openid/authorize/,
+        # so we must persist the original subdomain in session.
+        if request.method == 'GET':
+            try:
+                from urllib.parse import urlparse
+                initial_referer = request.META.get('HTTP_REFERER', '')
+                if initial_referer and 'bridgeapp.com' in initial_referer:
+                    parsed_ref = urlparse(initial_referer)
+                    host = parsed_ref.netloc.split(':')[0]
+                    if host.endswith('.bridgeapp.com'):
+                        origin_subdomain = host.split('.')[0]
+                        if origin_subdomain:
+                            request.session['oidc_origin_subdomain'] = origin_subdomain
+                            logger.info(f"OIDC authorize: captured origin subdomain from referer: {origin_subdomain}")
+            except Exception as e:
+                logger.warning(f"OIDC authorize: failed to capture origin subdomain: {e}")
         
         if account_id:
             account = OHSAccount.objects.filter(id=account_id, is_active=True).first()
@@ -218,8 +238,13 @@ def authorize(request):
                     logger.info(f"OIDC authorize: found account by email form submission: {login_email}, account={account.unique_id}")
                 else:
                     # Auto-import: user not in Django but might exist in Bridge subaccount
-                    # Extract subdomain from referer (Bridge subaccount URL)
-                    account = _try_auto_import_from_bridge(request, login_email, logger)
+                    import_subdomain = request.POST.get('origin_subdomain', '').strip() or origin_subdomain
+                    account = _try_auto_import_from_bridge(
+                        request,
+                        login_email,
+                        logger,
+                        subdomain_hint=import_subdomain
+                    )
                     if account:
                         logger.info(f"OIDC authorize: auto-imported user from Bridge: {login_email}")
                     else:
@@ -261,6 +286,7 @@ def authorize(request):
         <form method="POST" action="{request.get_full_path()}">
             <label for="email">Email Address</label>
             <input type="email" id="email" name="email" required autofocus placeholder="your.email@company.com" value="{request.POST.get('email', '') if request.method == 'POST' else ''}">
+            <input type="hidden" name="origin_subdomain" value="{origin_subdomain}">
             <button type="submit">Continue</button>
             {error_msg}
         </form>
