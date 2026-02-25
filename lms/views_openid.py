@@ -2,6 +2,7 @@
 OpenID Connect endpoints for OHS Insider Bridge SSO.
 """
 import base64
+import logging
 import secrets
 import urllib.parse
 
@@ -17,6 +18,8 @@ from django.shortcuts import get_object_or_404
 from .models import OHSAccount, OHSAuth, OAuthAuthorizationCode, OAuthAccessToken, PendingOIDCLogin
 from django.utils import timezone
 from datetime import timedelta
+
+logger = logging.getLogger(__name__)
 
 # Initialize Redis connection (optional - can use database instead)
 # Support both standard Redis and Redis Cluster Mode
@@ -34,8 +37,6 @@ try:
     else:
         r = redis.Redis(**settings.REDIS)
 except Exception as e:
-    import logging
-    logger = logging.getLogger(__name__)
     logger.warning(f"Redis connection failed: {e}. Using database fallback.")
     r = None
 
