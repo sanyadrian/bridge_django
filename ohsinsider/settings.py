@@ -137,12 +137,6 @@ OHS_BRIDGE_BASE_URL = 'https://safetynow.bridgeapp.com'
 OHS_BRIDGE_API_KEY = config('BRIDGE_API_KEY', default='your-bridge-api-key-here')
 OHS_BRIDGE_API_SECRET = config('BRIDGE_API_SECRET', default='your-bridge-api-secret-here')
 
-# Optional browser-session certificate PDF fallback (Playwright).
-# Enable only when API certificate endpoints cannot return binary PDFs.
-BRIDGE_BROWSER_PDF_ENABLED = config('BRIDGE_BROWSER_PDF_ENABLED', default=False, cast=bool)
-BRIDGE_BROWSER_ADMIN_EMAIL = config('BRIDGE_BROWSER_ADMIN_EMAIL', default='')
-BRIDGE_BROWSER_ADMIN_PASSWORD = config('BRIDGE_BROWSER_ADMIN_PASSWORD', default='')
-
 # Redis configuration for background tasks
 REDIS = {
     'host': 'localhost',

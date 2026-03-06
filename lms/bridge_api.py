@@ -4,7 +4,6 @@ Handles subaccount and user creation/management in Bridge LMS.
 """
 import json
 import re
-import os
 import requests
 from django.conf import settings
 
@@ -48,9 +47,6 @@ class BridgeAPI:
         self.session = requests.Session()
         self.session.auth = (self.api_key, self.api_secret)
         self.root_base_url = f'https://{root_subdomain}.bridgeapp.com/api/'
-        self.browser_pdf_enabled = os.environ.get('BRIDGE_BROWSER_PDF_ENABLED', '0').lower() in ('1', 'true', 'yes')
-        self.browser_admin_email = os.environ.get('BRIDGE_BROWSER_ADMIN_EMAIL', '').strip()
-        self.browser_admin_password = os.environ.get('BRIDGE_BROWSER_ADMIN_PASSWORD', '').strip()
     
     def _request(self, method, path, subdomain=None, **kwargs):
         """
@@ -921,140 +917,6 @@ class BridgeAPI:
             )
         return None
 
-    def download_certificate_author_pdf_via_browser(self, subdomain, course_id, enrollment_id):
-        """
-        Optional browser-session fallback for tenants where API cannot return PDF binary.
-
-        Requires env vars:
-            BRIDGE_BROWSER_PDF_ENABLED=1
-            BRIDGE_BROWSER_ADMIN_EMAIL=...
-            BRIDGE_BROWSER_ADMIN_PASSWORD=...
-
-        Returns:
-            bytes | None
-        """
-        import logging
-        logger = logging.getLogger(__name__)
-
-        if not self.browser_pdf_enabled:
-            return None
-        if not self.browser_admin_email or not self.browser_admin_password:
-            logger.debug("Browser PDF fallback disabled: missing BRIDGE_BROWSER_ADMIN_* credentials")
-            return None
-
-        cert_url = f'https://{subdomain}.bridgeapp.com/author/courses/{course_id}/enrollments/{enrollment_id}/certificate'
-        login_url = f'https://{subdomain}.bridgeapp.com/login'
-
-        try:
-            from playwright.sync_api import sync_playwright
-        except Exception as e:
-            logger.warning(f"Browser PDF fallback unavailable (playwright import failed): {e}")
-            return None
-
-        try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
-                context = browser.new_context()
-                page = context.new_page()
-
-                page.goto(login_url, wait_until='domcontentloaded', timeout=60000)
-
-                email_selectors = [
-                    'input[type="email"]',
-                    'input[name="email"]',
-                    'input[name="username"]',
-                    'input[id*="email"]',
-                ]
-                password_selectors = [
-                    'input[type="password"]',
-                    'input[name="password"]',
-                    'input[id*="password"]',
-                ]
-
-                email_filled = False
-                for sel in email_selectors:
-                    try:
-                        if page.locator(sel).count() > 0:
-                            page.fill(sel, self.browser_admin_email)
-                            email_filled = True
-                            break
-                    except Exception:
-                        continue
-
-                password_filled = False
-                for sel in password_selectors:
-                    try:
-                        if page.locator(sel).count() > 0:
-                            page.fill(sel, self.browser_admin_password)
-                            password_filled = True
-                            break
-                    except Exception:
-                        continue
-
-                if not email_filled or not password_filled:
-                    logger.debug(
-                        f"Browser PDF fallback: login form not detected for {subdomain} "
-                        f"(email_filled={email_filled}, password_filled={password_filled})"
-                    )
-                    browser.close()
-                    return None
-
-                # Submit login.
-                submitted = False
-                submit_selectors = [
-                    'button[type="submit"]',
-                    'input[type="submit"]',
-                    'button:has-text("Log in")',
-                    'button:has-text("Sign in")',
-                    'button:has-text("Login")',
-                ]
-                for sel in submit_selectors:
-                    try:
-                        if page.locator(sel).count() > 0:
-                            page.click(sel, timeout=5000)
-                            submitted = True
-                            break
-                    except Exception:
-                        continue
-                if not submitted:
-                    page.keyboard.press('Enter')
-
-                page.wait_for_timeout(2500)
-
-                # Navigate to cert page using authenticated browser session.
-                page.goto(cert_url, wait_until='domcontentloaded', timeout=90000)
-                page.wait_for_timeout(2000)
-
-                # First try downloading raw response using browser context request (inherits cookies).
-                try:
-                    resp = context.request.get(cert_url, timeout=90000)
-                    ctype = (resp.headers.get('content-type') or '').lower()
-                    body = resp.body()
-                    if 'pdf' in ctype and body:
-                        browser.close()
-                        return body
-                except Exception:
-                    pass
-
-                # Fallback: render current page to PDF.
-                try:
-                    # If route is still login page, auth failed.
-                    final_url = page.url or ''
-                    if '/login' in final_url:
-                        browser.close()
-                        return None
-                    pdf_bytes = page.pdf(format='A4', print_background=True)
-                    browser.close()
-                    return pdf_bytes if pdf_bytes else None
-                except Exception:
-                    browser.close()
-                    return None
-        except Exception as e:
-            logger.debug(
-                f"Browser PDF fallback failed for {subdomain} course={course_id} "
-                f"enrollment={enrollment_id}: {e}"
-            )
-            return None
 
     def get_author_certificate_data(self, subdomain, course_id, enrollment_id):
         """

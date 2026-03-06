@@ -9,4 +9,3 @@ gunicorn>=21.0.0
 whitenoise>=6.0.0
 dj-database-url>=2.0.0
 python-json-logger>=2.0.0
-playwright>=1.53.0

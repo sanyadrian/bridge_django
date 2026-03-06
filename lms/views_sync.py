@@ -1658,12 +1658,6 @@ def export_certificates(request):
                     if not cert_pdf:
                         cert_pdf = bridge_api.download_certificate_pdf(subdomain, course_id, enrollment_id)
                     if not cert_pdf:
-                        cert_pdf = bridge_api.download_certificate_author_pdf_via_browser(
-                            subdomain=subdomain,
-                            course_id=course_id,
-                            enrollment_id=enrollment_id
-                        )
-                    if not cert_pdf:
                         continue
 
                     course_slug = _safe_file_name(str(course_id))
@@ -1834,12 +1828,6 @@ def export_certificates(request):
                     if not cert_pdf:
                         # Last-ditch fallback for tenants that expose learner cert by user id.
                         cert_pdf = bridge_api.download_certificate_pdf(subdomain, course_id, bridge_user_id)
-                    if not cert_pdf:
-                        cert_pdf = bridge_api.download_certificate_author_pdf_via_browser(
-                            subdomain=subdomain,
-                            course_id=course_id,
-                            enrollment_id=enrollment_id
-                        )
                         if not cert_pdf:
                             continue
 
@@ -1895,12 +1883,6 @@ def export_certificates(request):
                         course_id=course_id,
                         enrollment_id=enrollment_id
                     )
-                    if not cert_pdf:
-                        cert_pdf = bridge_api.download_certificate_author_pdf_via_browser(
-                            subdomain=subdomain,
-                            course_id=course_id,
-                            enrollment_id=enrollment_id
-                        )
                     if not cert_pdf:
                         continue
 
