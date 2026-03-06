@@ -57,6 +57,22 @@ def _try_auto_import_from_bridge(request, email, logger, subdomain_hint=None):
         from urllib.parse import urlparse
         
         subdomain = (subdomain_hint or '').strip()
+        # Normalize and validate any provided hint first.
+        if subdomain:
+            hint = subdomain.lower()
+            if hint.startswith('http://') or hint.startswith('https://'):
+                parsed_hint = urlparse(hint)
+                hint = (parsed_hint.netloc or '').split(':')[0]
+            if hint.endswith('.bridgeapp.com'):
+                hint = hint.split('.')[0]
+            # Reject non-Bridge hosts accidentally passed from Django/ngrok hostnames.
+            if '.ngrok' in hint or hint.endswith('.safetynow.com') or hint.startswith('bridgeadmin'):
+                hint = ''
+            # Bridge subaccounts in this setup should map to *-safetynow.
+            if hint and not hint.endswith('-safetynow'):
+                hint = ''
+            subdomain = hint
+
         if not subdomain:
             referer = request.META.get('HTTP_REFERER', '')
             if not referer or 'bridgeapp.com' not in referer:
@@ -187,6 +203,10 @@ def authorize(request):
                         if origin_subdomain:
                             request.session['oidc_origin_subdomain'] = origin_subdomain
                             logger.info(f"OIDC authorize: captured origin subdomain from referer: {origin_subdomain}")
+                else:
+                    # Avoid stale subdomain hints from previous login attempts.
+                    if request.session.get('oidc_origin_subdomain'):
+                        request.session['oidc_origin_subdomain'] = ''
             except Exception as e:
                 logger.warning(f"OIDC authorize: failed to capture origin subdomain: {e}")
         
@@ -236,40 +256,16 @@ def authorize(request):
                 if not account:
                     account = OHSAccount.objects.filter(unique_id=login_email, is_active=True).first()
                 if account:
-                    admin_prefixes = {'ohsi', 'hri', 'ilt'}
-                    account_prefix = (account.prefix or '').strip().lower()
-                    inferred_subdomain = (account.bridge_subaccount_id or '').strip().lower()
-                    if not inferred_subdomain:
-                        try:
-                            from urllib.parse import urlparse
-                            parsed_unique = urlparse((account.unique_url or '').strip())
-                            host = (parsed_unique.netloc or '').strip().lower()
-                            if host.endswith('.bridgeapp.com'):
-                                inferred_subdomain = host.split('.')[0]
-                        except Exception:
-                            inferred_subdomain = ''
-
-                    is_portal_only_admin = (
-                        account_prefix in admin_prefixes
-                        or any(inferred_subdomain.startswith(p) for p in admin_prefixes)
+                    logger.warning(
+                        f"OIDC authorize: blocked email-form login for portal account "
+                        f"{account.unique_id}. Must use portal button."
                     )
-
-                    if is_portal_only_admin:
-                        logger.warning(
-                            f"OIDC authorize: blocked email-form login for portal-only account "
-                            f"{account.unique_id} (prefix={account_prefix}, subdomain={inferred_subdomain})"
-                        )
-                        login_form_error_msg = (
-                            '<p style="color:#c0392b;margin-top:10px;">'
-                            'Sorry, this admin account must be logged in via the portal button.'
-                            '</p>'
-                        )
-                        account = None
-                    else:
-                        logger.info(
-                            f"OIDC authorize: found account by email form submission: {login_email}, "
-                            f"account={account.unique_id}"
-                        )
+                    login_form_error_msg = (
+                        '<p style="color:#c0392b;margin-top:10px;">'
+                        'Sorry, this account must be logged in via the portal button.'
+                        '</p>'
+                    )
+                    account = None
                 else:
                     # Auto-import: user not in Django but might exist in Bridge subaccount
                     import_subdomain = request.POST.get('origin_subdomain', '').strip() or origin_subdomain
@@ -280,9 +276,12 @@ def authorize(request):
                         subdomain_hint=import_subdomain
                     )
                     if account:
-                        logger.info(f"OIDC authorize: auto-imported user from Bridge: {login_email}")
+                        logger.info(f"OIDC authorize: auto-imported URL-only user from Bridge: {login_email}")
                     else:
-                        logger.warning(f"OIDC authorize: email form submitted but no account found for: {login_email}")
+                        logger.warning(
+                            f"OIDC authorize: email form submitted but no portal account and no Bridge user found: "
+                            f"{login_email}"
+                        )
         
         # Final fallback: show email login form
         if not account:
