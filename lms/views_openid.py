@@ -20,6 +20,7 @@ from django.utils import timezone
 from datetime import timedelta
 
 logger = logging.getLogger(__name__)
+AUTO_IMPORT_COMPANY_MARKER = 'auto_import_bridge'
 
 # Initialize Redis connection (optional - can use database instead)
 # Support both standard Redis and Redis Cluster Mode
@@ -119,6 +120,9 @@ def _try_auto_import_from_bridge(request, email, logger, subdomain_hint=None):
                 'bridge_subaccount_id': subdomain,
                 'unique_url': unique_url,
                 'prefix': prefix,
+                # Marker used by authorize() to allow direct URL form login
+                # only for URL-only Bridge users (not portal/plugin-managed users).
+                'company_name': AUTO_IMPORT_COMPANY_MARKER,
                 'is_active': True,
                 'bridge_user_id': bridge_user.get('id'),
             }
@@ -127,8 +131,18 @@ def _try_auto_import_from_bridge(request, email, logger, subdomain_hint=None):
         if created:
             logger.info(f"Auto-import: created OHSAccount for {email} (Bridge user ID: {bridge_user.get('id')})")
         else:
+            changed = False
             if not account.is_active:
                 account.is_active = True
+                changed = True
+            if account.bridge_user_id is None and bridge_user.get('id'):
+                account.bridge_user_id = bridge_user.get('id')
+                changed = True
+            # Backfill marker for previously auto-imported style records.
+            if not (account.company_name or '').strip():
+                account.company_name = AUTO_IMPORT_COMPANY_MARKER
+                changed = True
+            if changed:
                 account.save()
             logger.info(f"Auto-import: OHSAccount already exists for {email} (reactivated: {not account.is_active})")
         
@@ -256,10 +270,20 @@ def authorize(request):
                 if not account:
                     account = OHSAccount.objects.filter(unique_id=login_email, is_active=True).first()
                 if account:
-                    # Block only portal-managed accounts. URL-only auto-imported accounts
-                    # should continue to work via direct URL/email form login.
-                    is_portal_managed = bool(account.bridge_account_id)
-                    if is_portal_managed:
+                    # Allow URL form login only for URL-only users auto-imported from Bridge.
+                    # All portal/plugin-managed users must use the portal button flow.
+                    is_marked_auto_import = (
+                        (account.company_name or '').strip().lower() == AUTO_IMPORT_COMPANY_MARKER
+                    )
+                    looks_like_auto_import = (
+                        bool(account.bridge_user_id) and
+                        not account.prefix and
+                        not account.bridge_account_id and
+                        not (account.company_name or '').strip()
+                    )
+                    allow_direct_url_form_login = is_marked_auto_import or looks_like_auto_import
+
+                    if not allow_direct_url_form_login:
                         logger.warning(
                             f"OIDC authorize: blocked email-form login for portal account "
                             f"{account.unique_id}. Must use portal button."
@@ -272,8 +296,8 @@ def authorize(request):
                         account = None
                     else:
                         logger.info(
-                            f"OIDC authorize: allowing email-form login for non-portal account "
-                            f"{account.unique_id} (bridge_account_id is empty)"
+                            f"OIDC authorize: allowing email-form login for URL-only account "
+                            f"{account.unique_id}"
                         )
                 else:
                     # Auto-import: user not in Django but might exist in Bridge subaccount
