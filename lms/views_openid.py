@@ -169,6 +169,7 @@ def authorize(request):
         logger = logging.getLogger(__name__)
         
         account = None
+        login_form_error_msg = ''
         origin_subdomain = request.session.get('oidc_origin_subdomain', '')
 
         # Capture original Bridge subaccount from the initial GET referer.
@@ -235,7 +236,40 @@ def authorize(request):
                 if not account:
                     account = OHSAccount.objects.filter(unique_id=login_email, is_active=True).first()
                 if account:
-                    logger.info(f"OIDC authorize: found account by email form submission: {login_email}, account={account.unique_id}")
+                    admin_prefixes = {'ohsi', 'hri', 'ilt'}
+                    account_prefix = (account.prefix or '').strip().lower()
+                    inferred_subdomain = (account.bridge_subaccount_id or '').strip().lower()
+                    if not inferred_subdomain:
+                        try:
+                            from urllib.parse import urlparse
+                            parsed_unique = urlparse((account.unique_url or '').strip())
+                            host = (parsed_unique.netloc or '').strip().lower()
+                            if host.endswith('.bridgeapp.com'):
+                                inferred_subdomain = host.split('.')[0]
+                        except Exception:
+                            inferred_subdomain = ''
+
+                    is_portal_only_admin = (
+                        account_prefix in admin_prefixes
+                        or any(inferred_subdomain.startswith(p) for p in admin_prefixes)
+                    )
+
+                    if is_portal_only_admin:
+                        logger.warning(
+                            f"OIDC authorize: blocked email-form login for portal-only account "
+                            f"{account.unique_id} (prefix={account_prefix}, subdomain={inferred_subdomain})"
+                        )
+                        login_form_error_msg = (
+                            '<p style="color:#c0392b;margin-top:10px;">'
+                            'Sorry, this admin account must be logged in via the portal button.'
+                            '</p>'
+                        )
+                        account = None
+                    else:
+                        logger.info(
+                            f"OIDC authorize: found account by email form submission: {login_email}, "
+                            f"account={account.unique_id}"
+                        )
                 else:
                     # Auto-import: user not in Django but might exist in Bridge subaccount
                     import_subdomain = request.POST.get('origin_subdomain', '').strip() or origin_subdomain
@@ -259,7 +293,9 @@ def authorize(request):
             
             # Preserve all OIDC parameters for the form POST
             error_msg = ''
-            if request.method == 'POST' and request.POST.get('email'):
+            if login_form_error_msg:
+                error_msg = login_form_error_msg
+            elif request.method == 'POST' and request.POST.get('email'):
                 error_msg = '<p style="color:#c0392b;margin-top:10px;">Account not found. Please check your email and try again.</p>'
             
             login_form = f"""<!DOCTYPE html>
