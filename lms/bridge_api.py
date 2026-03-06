@@ -3,6 +3,8 @@ Bridge API wrapper for OHS Insider integration.
 Handles subaccount and user creation/management in Bridge LMS.
 """
 import json
+import re
+import os
 import requests
 from django.conf import settings
 
@@ -46,6 +48,9 @@ class BridgeAPI:
         self.session = requests.Session()
         self.session.auth = (self.api_key, self.api_secret)
         self.root_base_url = f'https://{root_subdomain}.bridgeapp.com/api/'
+        self.browser_pdf_enabled = os.environ.get('BRIDGE_BROWSER_PDF_ENABLED', '0').lower() in ('1', 'true', 'yes')
+        self.browser_admin_email = os.environ.get('BRIDGE_BROWSER_ADMIN_EMAIL', '').strip()
+        self.browser_admin_password = os.environ.get('BRIDGE_BROWSER_ADMIN_PASSWORD', '').strip()
     
     def _request(self, method, path, subdomain=None, **kwargs):
         """
@@ -117,6 +122,27 @@ class BridgeAPI:
                 if hasattr(e, 'response') and hasattr(e.response, 'text'):
                     logger.error(f"Raw response text: {e.response.text[:500]}")
             
+            raise BridgeAPIError(f"Bridge API error: {str(e)}") from e
+        except requests.exceptions.RequestException as e:
+            raise BridgeAPIError(f"Request failed: {str(e)}") from e
+
+    def _request_raw(self, method, path, subdomain=None, **kwargs):
+        """
+        Make a request to Bridge API and return raw response object.
+
+        Use this for binary/non-JSON endpoints (e.g., certificate files).
+        """
+        base_url = f'https://{subdomain}.bridgeapp.com/api/' if subdomain else self.root_base_url
+        url = f'{base_url}{path}'
+
+        if 'timeout' not in kwargs:
+            kwargs['timeout'] = 60
+
+        try:
+            response = self.session.request(method, url, **kwargs)
+            response.raise_for_status()
+            return response
+        except requests.exceptions.HTTPError as e:
             raise BridgeAPIError(f"Bridge API error: {str(e)}") from e
         except requests.exceptions.RequestException as e:
             raise BridgeAPIError(f"Request failed: {str(e)}") from e
@@ -634,6 +660,601 @@ class BridgeAPI:
             return None
         except BridgeAPIError:
             return None
+
+    def list_user_enrollments(self, subdomain, user_id, limit=None):
+        """
+        List enrollments for a user in a subaccount.
+
+        Bridge endpoints differ across tenants; try multiple known routes.
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+
+        endpoint_candidates = [
+            f'admin/users/{user_id}/enrollments',
+            f'author/users/{user_id}/enrollments',
+        ]
+
+        for endpoint in endpoint_candidates:
+            try:
+                enrollments = []
+                url = None
+                params = {'limit': 100}
+                page_count = 0
+
+                while True:
+                    page_count += 1
+                    if url is None:
+                        response = self._request('get', endpoint, subdomain=subdomain, params=params)
+                    else:
+                        response_obj = self.session.get(url, timeout=60)
+                        response_obj.raise_for_status()
+                        response = response_obj.json()
+
+                    page_items = response.get('enrollments', [])
+                    if not page_items:
+                        break
+
+                    enrollments.extend(page_items)
+                    if limit and len(enrollments) >= limit:
+                        break
+
+                    next_url = response.get('meta', {}).get('next')
+                    if not next_url:
+                        break
+                    url = next_url
+                    params = {}
+
+                result = enrollments[:limit] if limit else enrollments
+                if result:
+                    logger.info(
+                        f"Fetched {len(result)} enrollments for user {user_id} "
+                        f"from {subdomain} via {endpoint}"
+                    )
+                    return result
+
+                logger.info(
+                    f"Fetched 0 enrollments for user {user_id} from {subdomain} via {endpoint}; "
+                    f"trying next endpoint"
+                )
+            except Exception as e:
+                logger.debug(f"Enrollment endpoint failed ({endpoint}): {e}")
+                continue
+
+        logger.warning(f"Could not fetch enrollments for user {user_id} in {subdomain}")
+        return []
+
+    def list_course_enrollments(self, subdomain, course_id, limit=100):
+        """
+        List enrollments for a course template from author endpoint.
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        endpoints = [
+            f'author/course_templates/{course_id}/enrollments',
+            f'author/courses/{course_id}/enrollments',
+            f'learner/courses/{course_id}/enrollments',
+        ]
+        for endpoint in endpoints:
+            try:
+                enrollments = []
+                url = None
+                params = {'limit': limit or 100}
+
+                while True:
+                    if url is None:
+                        response = self._request(
+                            'get',
+                            endpoint,
+                            subdomain=subdomain,
+                            params=params
+                        )
+                    else:
+                        response_obj = self.session.get(url, timeout=60)
+                        response_obj.raise_for_status()
+                        response = response_obj.json()
+
+                    page_items = response.get('enrollments', []) or []
+                    if not page_items:
+                        break
+
+                    enrollments.extend(page_items)
+                    if limit and len(enrollments) >= limit:
+                        break
+
+                    next_url = response.get('meta', {}).get('next')
+                    if not next_url:
+                        break
+                    url = next_url
+                    params = {}
+
+                if limit:
+                    enrollments = enrollments[:limit]
+                if enrollments:
+                    logger.debug(
+                        f"Fetched {len(enrollments)} course enrollments for course {course_id} "
+                        f"in {subdomain} via {endpoint}"
+                    )
+                    return enrollments
+
+                logger.debug(
+                    f"Fetched 0 course enrollments for course {course_id} in {subdomain} via {endpoint}; "
+                    f"trying next endpoint"
+                )
+            except Exception as e:
+                logger.debug(f"Course enrollment endpoint failed ({endpoint}) for {course_id} in {subdomain}: {e}")
+                continue
+        return []
+
+    def find_user_enrollment_for_course(self, subdomain, course_id, user_id=None, email=None):
+        """
+        Find an enrollment for a specific user in a specific course.
+        """
+        enrollments = self.list_course_enrollments(subdomain, course_id, limit=200)
+        if not enrollments:
+            return None
+
+        user_id_str = str(user_id) if user_id is not None else None
+        email_l = (email or '').lower()
+        for enr in enrollments:
+            user_obj = enr.get('user') or {}
+            learner_obj = enr.get('learner') or {}
+            student_obj = enr.get('student') or {}
+            candidate_ids = [
+                enr.get('user_id'),
+                enr.get('learner_id'),
+                enr.get('student_id'),
+                user_obj.get('id'),
+                learner_obj.get('id'),
+                student_obj.get('id'),
+            ]
+            candidate_email = (
+                (enr.get('email') or '')
+                or (enr.get('user_email') or '')
+                or (enr.get('learner_email') or '')
+                or (user_obj.get('email') or '')
+                or (learner_obj.get('email') or '')
+                or (student_obj.get('email') or '')
+            ).lower()
+            candidate_uid = (
+                (enr.get('uid') or '')
+                or (enr.get('user_uid') or '')
+                or (user_obj.get('uid') or '')
+                or (learner_obj.get('uid') or '')
+            ).lower()
+
+            if user_id_str and any(str(cid) == user_id_str for cid in candidate_ids if cid is not None):
+                return enr
+            if email_l and candidate_email and candidate_email == email_l:
+                return enr
+            if email_l and candidate_uid and candidate_uid == email_l:
+                return enr
+        return None
+
+    def list_subaccount_courses(self, subdomain, limit=None):
+        """
+        List course templates from a subaccount.
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+
+        courses = []
+        url = None
+        params = {'limit': 100}
+        endpoint = 'author/course_templates'
+
+        while True:
+            try:
+                if url is None:
+                    response = self._request('get', endpoint, subdomain=subdomain, params=params)
+                else:
+                    response_obj = self.session.get(url, timeout=60)
+                    response_obj.raise_for_status()
+                    response = response_obj.json()
+
+                page_items = response.get('course_templates', []) or []
+                if not page_items:
+                    break
+
+                courses.extend(page_items)
+                if limit and len(courses) >= limit:
+                    break
+
+                next_url = response.get('meta', {}).get('next')
+                if not next_url:
+                    break
+                url = next_url
+                params = {}
+            except Exception as e:
+                logger.debug(f"Subaccount course listing failed for {subdomain}: {e}")
+                break
+
+        if limit:
+            return courses[:limit]
+        return courses
+
+    def download_certificate_author_pdf(self, subdomain, course_id, enrollment_id):
+        """
+        Download certificate via author endpoint for course+enrollment.
+        Returns PDF bytes or None.
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        api_paths = [
+            f'author/course_templates/{course_id}/enrollments/{enrollment_id}/certificate',
+            f'author/courses/{course_id}/enrollments/{enrollment_id}/certificate',
+        ]
+        for path in api_paths:
+            try:
+                resp = self._request_raw('get', path, subdomain=subdomain, timeout=90)
+                content_type = (resp.headers.get('Content-Type') or '').lower()
+                if 'pdf' in content_type and resp.content:
+                    return resp.content
+
+                # Some tenants return JSON metadata instead of binary PDF.
+                logger.debug(
+                    f"Author certificate endpoint not PDF for {subdomain} course={course_id} "
+                    f"enrollment={enrollment_id} path={path} (content-type={content_type})"
+                )
+            except Exception as e:
+                logger.debug(
+                    f"Author certificate download failed for {subdomain} course={course_id} "
+                    f"enrollment={enrollment_id} path={path}: {e}"
+                )
+
+        # Try non-API author web route (works in some tenant/session combinations)
+        try:
+            web_url = f'https://{subdomain}.bridgeapp.com/author/courses/{course_id}/enrollments/{enrollment_id}/certificate'
+            resp = self.session.get(web_url, timeout=90)
+            resp.raise_for_status()
+            content_type = (resp.headers.get('Content-Type') or '').lower()
+            if 'pdf' in content_type and resp.content:
+                return resp.content
+            logger.debug(
+                f"Author web certificate URL not PDF for {subdomain} course={course_id} "
+                f"enrollment={enrollment_id} (content-type={content_type})"
+            )
+        except Exception as e:
+            logger.debug(
+                f"Author web certificate download failed for {subdomain} course={course_id} "
+                f"enrollment={enrollment_id}: {e}"
+            )
+        return None
+
+    def download_certificate_author_pdf_via_browser(self, subdomain, course_id, enrollment_id):
+        """
+        Optional browser-session fallback for tenants where API cannot return PDF binary.
+
+        Requires env vars:
+            BRIDGE_BROWSER_PDF_ENABLED=1
+            BRIDGE_BROWSER_ADMIN_EMAIL=...
+            BRIDGE_BROWSER_ADMIN_PASSWORD=...
+
+        Returns:
+            bytes | None
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+
+        if not self.browser_pdf_enabled:
+            return None
+        if not self.browser_admin_email or not self.browser_admin_password:
+            logger.debug("Browser PDF fallback disabled: missing BRIDGE_BROWSER_ADMIN_* credentials")
+            return None
+
+        cert_url = f'https://{subdomain}.bridgeapp.com/author/courses/{course_id}/enrollments/{enrollment_id}/certificate'
+        login_url = f'https://{subdomain}.bridgeapp.com/login'
+
+        try:
+            from playwright.sync_api import sync_playwright
+        except Exception as e:
+            logger.warning(f"Browser PDF fallback unavailable (playwright import failed): {e}")
+            return None
+
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                context = browser.new_context()
+                page = context.new_page()
+
+                page.goto(login_url, wait_until='domcontentloaded', timeout=60000)
+
+                email_selectors = [
+                    'input[type="email"]',
+                    'input[name="email"]',
+                    'input[name="username"]',
+                    'input[id*="email"]',
+                ]
+                password_selectors = [
+                    'input[type="password"]',
+                    'input[name="password"]',
+                    'input[id*="password"]',
+                ]
+
+                email_filled = False
+                for sel in email_selectors:
+                    try:
+                        if page.locator(sel).count() > 0:
+                            page.fill(sel, self.browser_admin_email)
+                            email_filled = True
+                            break
+                    except Exception:
+                        continue
+
+                password_filled = False
+                for sel in password_selectors:
+                    try:
+                        if page.locator(sel).count() > 0:
+                            page.fill(sel, self.browser_admin_password)
+                            password_filled = True
+                            break
+                    except Exception:
+                        continue
+
+                if not email_filled or not password_filled:
+                    logger.debug(
+                        f"Browser PDF fallback: login form not detected for {subdomain} "
+                        f"(email_filled={email_filled}, password_filled={password_filled})"
+                    )
+                    browser.close()
+                    return None
+
+                # Submit login.
+                submitted = False
+                submit_selectors = [
+                    'button[type="submit"]',
+                    'input[type="submit"]',
+                    'button:has-text("Log in")',
+                    'button:has-text("Sign in")',
+                    'button:has-text("Login")',
+                ]
+                for sel in submit_selectors:
+                    try:
+                        if page.locator(sel).count() > 0:
+                            page.click(sel, timeout=5000)
+                            submitted = True
+                            break
+                    except Exception:
+                        continue
+                if not submitted:
+                    page.keyboard.press('Enter')
+
+                page.wait_for_timeout(2500)
+
+                # Navigate to cert page using authenticated browser session.
+                page.goto(cert_url, wait_until='domcontentloaded', timeout=90000)
+                page.wait_for_timeout(2000)
+
+                # First try downloading raw response using browser context request (inherits cookies).
+                try:
+                    resp = context.request.get(cert_url, timeout=90000)
+                    ctype = (resp.headers.get('content-type') or '').lower()
+                    body = resp.body()
+                    if 'pdf' in ctype and body:
+                        browser.close()
+                        return body
+                except Exception:
+                    pass
+
+                # Fallback: render current page to PDF.
+                try:
+                    # If route is still login page, auth failed.
+                    final_url = page.url or ''
+                    if '/login' in final_url:
+                        browser.close()
+                        return None
+                    pdf_bytes = page.pdf(format='A4', print_background=True)
+                    browser.close()
+                    return pdf_bytes if pdf_bytes else None
+                except Exception:
+                    browser.close()
+                    return None
+        except Exception as e:
+            logger.debug(
+                f"Browser PDF fallback failed for {subdomain} course={course_id} "
+                f"enrollment={enrollment_id}: {e}"
+            )
+            return None
+
+    def get_author_certificate_data(self, subdomain, course_id, enrollment_id):
+        """
+        Get certificate metadata from author endpoint.
+
+        Returns:
+            list[dict] certificate objects (empty list if none/failed)
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        paths = [
+            f'author/course_templates/{course_id}/enrollments/{enrollment_id}/certificate',
+            f'author/courses/{course_id}/enrollments/{enrollment_id}/certificate',
+        ]
+        for path in paths:
+            try:
+                response = self._request('get', path, subdomain=subdomain, timeout=60)
+                certs = response.get('certificates', []) or []
+                if certs:
+                    return certs
+            except Exception as e:
+                logger.debug(
+                    f"Author certificate metadata failed for {subdomain} course={course_id} "
+                    f"enrollment={enrollment_id} path={path}: {e}"
+                )
+        return []
+
+    def get_learner_certificate_data(self, subdomain, course_id, learner_id_or_enrollment_id):
+        """
+        Get certificate metadata from learner endpoints (best effort).
+
+        Returns:
+            list[dict] certificate objects (empty list if none/failed)
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        paths = [
+            f'learner/courses/{course_id}/certificate/{learner_id_or_enrollment_id}',
+            f'learner/courses/{course_id}/enrollments/{learner_id_or_enrollment_id}/certificate',
+        ]
+        for path in paths:
+            try:
+                response = self._request('get', path, subdomain=subdomain, timeout=60)
+                certs = response.get('certificates', []) or []
+                if certs:
+                    return certs
+            except Exception as e:
+                logger.debug(
+                    f"Learner certificate metadata failed for {subdomain} course={course_id} "
+                    f"ref={learner_id_or_enrollment_id} path={path}: {e}"
+                )
+        return []
+
+    def download_certificate_pdf(self, subdomain, course_id, certificate_ref_id):
+        """
+        Try to download a certificate PDF for a course + reference id.
+
+        Note:
+        Some Bridge tenants use enrollment_id in certificate URL/API path,
+        others use learner/user id. We try both patterns.
+
+        Returns:
+            bytes | None
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+
+        # API route (if tenant returns PDF)
+        api_paths = [
+            f'learner/courses/{course_id}/certificate/{certificate_ref_id}',
+            f'learner/courses/{course_id}/enrollments/{certificate_ref_id}/certificate',
+        ]
+        for api_path in api_paths:
+            try:
+                resp = self._request_raw('get', api_path, subdomain=subdomain, timeout=90)
+                content_type = (resp.headers.get('Content-Type') or '').lower()
+                if 'pdf' in content_type and resp.content:
+                    return resp.content
+                logger.debug(
+                    f"Certificate API not PDF for {subdomain} course={course_id} ref={certificate_ref_id} "
+                    f"path={api_path} (content-type={content_type})"
+                )
+            except Exception as e:
+                logger.debug(f"Certificate API download failed ({api_path}): {e}")
+
+        # Web route (some tenants expose PDF at learner URL)
+        try:
+            web_url = f'https://{subdomain}.bridgeapp.com/learner/courses/{course_id}/certificate/{certificate_ref_id}'
+            resp = self.session.get(web_url, timeout=90)
+            resp.raise_for_status()
+            content_type = (resp.headers.get('Content-Type') or '').lower()
+            if 'pdf' in content_type and resp.content:
+                return resp.content
+            logger.debug(
+                f"Certificate web URL not PDF for {subdomain} course={course_id} ref={certificate_ref_id} "
+                f"(content-type={content_type})"
+            )
+        except Exception as e:
+            logger.debug(f"Certificate web download failed: {e}")
+
+        return None
+
+    def get_admin_learner_certificate_links(self, subdomain, learner_id):
+        """
+        Best-effort HTML fallback:
+        parse /admin/learner/{learner_id} for author certificate links.
+
+        Returns:
+            list[dict]: [{"course_id": "...", "enrollment_id": "...", "url": "https://..."}]
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        try:
+            url = f'https://{subdomain}.bridgeapp.com/admin/learner/{learner_id}'
+            resp = self.session.get(url, timeout=90)
+            resp.raise_for_status()
+            html = resp.text or ""
+            if not html:
+                return []
+
+            # Matches both absolute and relative author certificate links.
+            # Example:
+            # /author/courses/5256/enrollments/425400/certificate
+            pattern = re.compile(
+                r'(?:https://[^"\']+)?/author/courses/(?P<course>\d+)/enrollments/(?P<enr>\d+)/certificate'
+            )
+            found = []
+            seen = set()
+            for m in pattern.finditer(html):
+                course_id = m.group('course')
+                enrollment_id = m.group('enr')
+                key = (course_id, enrollment_id)
+                if key in seen:
+                    continue
+                seen.add(key)
+                found.append({
+                    'course_id': course_id,
+                    'enrollment_id': enrollment_id,
+                    'url': f"https://{subdomain}.bridgeapp.com/author/courses/{course_id}/enrollments/{enrollment_id}/certificate",
+                })
+
+            logger.info(
+                f"Admin learner HTML fallback found {len(found)} certificate link(s) "
+                f"for learner {learner_id} in {subdomain}"
+            )
+            return found
+        except Exception as e:
+            logger.debug(
+                f"Admin learner HTML fallback failed for learner {learner_id} in {subdomain}: {e}"
+            )
+            return []
+
+    def get_admin_learner_course_ids(self, subdomain, learner_id, limit=500):
+        """
+        Parse /admin/learner/{id} HTML for course ids to prioritize certificate lookup.
+
+        Returns:
+            list[str]: course ids (best effort, de-duplicated)
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        try:
+            url = f'https://{subdomain}.bridgeapp.com/admin/learner/{learner_id}'
+            resp = self.session.get(url, timeout=90)
+            resp.raise_for_status()
+            html = resp.text or ""
+            if not html:
+                return []
+
+            patterns = [
+                re.compile(r'/author/courses/(?P<course>\d+)/learners'),
+                re.compile(r'/author/courses/(?P<course>\d+)'),
+                re.compile(r'/learner/courses/(?P<course>\d+)/certificate'),
+            ]
+            found = []
+            seen = set()
+            for pattern in patterns:
+                for m in pattern.finditer(html):
+                    cid = m.group('course')
+                    if not cid or cid in seen:
+                        continue
+                    seen.add(cid)
+                    found.append(cid)
+                    if limit and len(found) >= limit:
+                        logger.info(
+                            f"Admin learner course-id fallback reached limit={limit} "
+                            f"for learner {learner_id} in {subdomain}"
+                        )
+                        return found
+
+            logger.info(
+                f"Admin learner HTML fallback found {len(found)} course id(s) "
+                f"for learner {learner_id} in {subdomain}"
+            )
+            return found
+        except Exception as e:
+            logger.debug(
+                f"Admin learner course-id fallback failed for learner {learner_id} in {subdomain}: {e}"
+            )
+            return []
     
     def create_user(self, subdomain, uid, email, first_name, last_name):
         """
