@@ -1528,6 +1528,8 @@ def export_certificates(request):
 
     signature = data.get('signature')
     emails = data.get('emails', [])
+    export_all_for_courses = bool(data.get('export_all_for_courses'))
+    subdomain_hint = (data.get('subdomain') or '').strip()
     raw_course_ids = data.get('course_ids', [])
     if not isinstance(raw_course_ids, list):
         raw_course_ids = []
@@ -1547,16 +1549,23 @@ def export_certificates(request):
 
     if not signature:
         return JsonResponse({'error': 'Missing signature'}, status=400)
-    if not isinstance(emails, list) or not emails:
-        return JsonResponse({'error': 'No emails provided'}, status=400)
+    if not isinstance(emails, list):
+        return JsonResponse({'error': 'Invalid emails payload'}, status=400)
+    if not emails and not (export_all_for_courses and requested_course_ids):
+        return JsonResponse({'error': 'Provide emails or course_ids with export_all_for_courses=true'}, status=400)
     if abs(time.time() - timestamp) > 300:
         return JsonResponse({'error': 'Request expired'}, status=400)
 
-    # Verify signature (same strategy as unsync endpoint)
-    sig_data = {
-        'emails': ','.join(emails),
-        'timestamp': timestamp,
-    }
+    # Verify signature (supports user mode and course-only mode)
+    sig_data = {'timestamp': timestamp}
+    if emails:
+        sig_data['emails'] = ','.join(emails)
+    if requested_course_ids:
+        sig_data['course_ids'] = ','.join(requested_course_ids)
+    if subdomain_hint:
+        sig_data['subdomain'] = subdomain_hint
+    if export_all_for_courses:
+        sig_data['export_all_for_courses'] = '1'
     data_string = urlencode(sorted(sig_data.items()), doseq=True)
     matched_auth = None
     for auth in OHSAuth.objects.filter(is_active=True):
@@ -1577,69 +1586,72 @@ def export_certificates(request):
     certificate_links = []
     certificate_records = []
     user_summary = []
+    course_only_mode = export_all_for_courses and bool(requested_course_ids)
+
+    def _normalize_subdomain(value):
+        v = (value or '').strip()
+        if not v:
+            return ''
+        if v.startswith('http://') or v.startswith('https://'):
+            try:
+                from urllib.parse import urlparse
+                v = (urlparse(v).netloc or '').strip()
+            except Exception:
+                v = v.replace('https://', '').replace('http://', '')
+        if v.endswith('.bridgeapp.com'):
+            v = v.split('.')[0]
+        if v and '-safetynow' not in v:
+            v = f"{v}-safetynow"
+        return v
 
     with zipfile.ZipFile(zip_buffer, mode='w', compression=zipfile.ZIP_DEFLATED) as zf:
-        for raw_email in emails:
-            email = (raw_email or '').strip().lower()
-            if not email:
-                continue
+        if course_only_mode:
+            if subdomain_hint:
+                target_subdomains = [_normalize_subdomain(subdomain_hint)]
+            else:
+                target_subdomains = list(
+                    OHSAccount.objects.filter(is_active=True)
+                    .exclude(bridge_subaccount_id__isnull=True)
+                    .exclude(bridge_subaccount_id='')
+                    .values_list('bridge_subaccount_id', flat=True)
+                    .distinct()
+                )
+                target_subdomains = [_normalize_subdomain(s) for s in target_subdomains if s]
+                target_subdomains = sorted(set([s for s in target_subdomains if s]))
 
-            account = OHSAccount.objects.filter(user_email=email, is_active=True).first()
-            if not account:
-                account = OHSAccount.objects.filter(unique_id=email, is_active=True).first()
-            if not account:
-                user_summary.append({'email': email, 'status': 'not_found'})
-                continue
-
-            subdomain = (account.bridge_subaccount_id or '').strip()
-            if not subdomain:
-                user_summary.append({'email': email, 'status': 'no_subaccount'})
-                continue
-            if subdomain.endswith('.bridgeapp.com'):
-                subdomain = subdomain.split('.')[0]
-            if '-safetynow' not in subdomain:
-                subdomain = f"{subdomain}-safetynow"
-
-            bridge_user = bridge_api.get_user(subdomain, email)
-            if not bridge_user:
-                user_summary.append({'email': email, 'status': 'bridge_user_not_found', 'subdomain': subdomain})
-                continue
-
-            bridge_user_id = bridge_user.get('id')
-            user_exported = 0
-            enrollments = bridge_api.list_user_enrollments(subdomain, bridge_user_id)
-            if enrollments:
-                for enrollment in enrollments:
-                    enrollment_id = enrollment.get('id')
-                    course_id = (
-                        enrollment.get('course_template_id')
-                        or enrollment.get('course_id')
-                        or enrollment.get('learnable_id')
-                    )
-                    if not enrollment_id or not course_id:
+            seen_export_keys = set()
+            user_counts = {}
+            logger.info(
+                f"Course-only export mode: {len(requested_course_ids)} course(s), "
+                f"{len(target_subdomains)} subaccount(s)"
+            )
+            for subdomain in target_subdomains:
+                for course_id in requested_course_ids:
+                    enrollments = bridge_api.list_course_enrollments(subdomain, course_id, limit=5000)
+                    if not enrollments:
                         continue
-                    if requested_course_ids and str(course_id) not in seen_requested_course_ids:
-                        continue
+                    for enrollment in enrollments:
+                        enrollment_id = enrollment.get('id')
+                        if not enrollment_id:
+                            continue
+                        key = (str(subdomain), str(course_id), str(enrollment_id))
+                        if key in seen_export_keys:
+                            continue
+                        seen_export_keys.add(key)
 
-                    cert_link = f"https://{subdomain}.bridgeapp.com/author/courses/{course_id}/enrollments/{enrollment_id}/certificate"
-                    cert_meta = bridge_api.get_author_certificate_data(subdomain, course_id, enrollment_id)
-                    if not cert_meta:
-                        cert_meta = bridge_api.get_learner_certificate_data(subdomain, course_id, enrollment_id)
-                    if cert_meta:
-                        for cert in cert_meta:
-                            certificate_records.append({
-                                'email': email,
-                                'subdomain': subdomain,
-                                'course_id': course_id,
-                                'enrollment_id': enrollment_id,
-                                'certificate_url': cert_link,
-                                'issuer': cert.get('issuer', ''),
-                                'learnable_title': cert.get('learnable_title', ''),
-                                'earned_at': cert.get('earned_at', ''),
-                                'recipient': cert.get('recipient', ''),
-                                'score': cert.get('score', ''),
-                                'course': cert.get('course', ''),
-                            })
+                        user_obj = enrollment.get('user') or {}
+                        learner_obj = enrollment.get('learner') or {}
+                        email = (
+                            (enrollment.get('email') or '')
+                            or (enrollment.get('user_email') or '')
+                            or (enrollment.get('learner_email') or '')
+                            or (user_obj.get('email') or '')
+                            or (learner_obj.get('email') or '')
+                        ).strip().lower()
+                        if not email:
+                            continue
+
+                        cert_link = f"https://{subdomain}.bridgeapp.com/author/courses/{course_id}/enrollments/{enrollment_id}/certificate"
                         certificate_links.append({
                             'email': email,
                             'subdomain': subdomain,
@@ -1647,170 +1659,318 @@ def export_certificates(request):
                             'enrollment_id': enrollment_id,
                             'certificate_url': cert_link,
                         })
-                        # Count metadata hit as a successful certificate export unit
+
+                        user_key = (email, subdomain)
+                        user_counts[user_key] = user_counts.get(user_key, 0) + 1
+
+                        cert_meta = bridge_api.get_author_certificate_data(subdomain, course_id, enrollment_id)
+                        if not cert_meta:
+                            cert_meta = bridge_api.get_learner_certificate_data(subdomain, course_id, enrollment_id)
+                        if cert_meta:
+                            for cert in cert_meta:
+                                certificate_records.append({
+                                    'email': email,
+                                    'subdomain': subdomain,
+                                    'course_id': course_id,
+                                    'enrollment_id': enrollment_id,
+                                    'certificate_url': cert_link,
+                                    'issuer': cert.get('issuer', ''),
+                                    'learnable_title': cert.get('learnable_title', ''),
+                                    'earned_at': cert.get('earned_at', ''),
+                                    'recipient': cert.get('recipient', ''),
+                                    'score': cert.get('score', ''),
+                                    'course': cert.get('course', ''),
+                                })
+
+                        cert_pdf = bridge_api.download_certificate_author_pdf(
+                            subdomain=subdomain,
+                            course_id=course_id,
+                            enrollment_id=enrollment_id
+                        )
+                        if not cert_pdf:
+                            cert_pdf = bridge_api.download_certificate_pdf(subdomain, course_id, enrollment_id)
+                        if cert_pdf:
+                            course_slug = _safe_file_name(str(course_id))
+                            email_slug = _safe_file_name(email)
+                            file_name = f"{email_slug}/course_{course_slug}_enrollment_{enrollment_id}.pdf"
+                            zf.writestr(file_name, cert_pdf)
+                            exported_files += 1
+
+            if user_counts:
+                for (email, subdomain), count in user_counts.items():
+                    user_summary.append({
+                        'email': email,
+                        'status': 'exported',
+                        'count': count,
+                        'subdomain': subdomain
+                    })
+            else:
+                user_summary.append({
+                    'email': '',
+                    'status': 'no_certificates_found',
+                    'subdomain': subdomain_hint or 'all_subaccounts'
+                })
+
+        else:
+            for raw_email in emails:
+                email = (raw_email or '').strip().lower()
+                if not email:
+                    continue
+
+                account = OHSAccount.objects.filter(user_email=email, is_active=True).first()
+                if not account:
+                    account = OHSAccount.objects.filter(unique_id=email, is_active=True).first()
+                if not account:
+                    user_summary.append({'email': email, 'status': 'not_found'})
+                    continue
+
+                subdomain = (account.bridge_subaccount_id or '').strip()
+                if not subdomain:
+                    user_summary.append({'email': email, 'status': 'no_subaccount'})
+                    continue
+                subdomain = _normalize_subdomain(subdomain)
+
+                bridge_user = bridge_api.get_user(subdomain, email)
+                if not bridge_user:
+                    user_summary.append({'email': email, 'status': 'bridge_user_not_found', 'subdomain': subdomain})
+                    continue
+
+                bridge_user_id = bridge_user.get('id')
+                user_exported = 0
+                enrollments = bridge_api.list_user_enrollments(subdomain, bridge_user_id)
+                if enrollments:
+                    for enrollment in enrollments:
+                        enrollment_id = enrollment.get('id')
+                        course_id = (
+                            enrollment.get('course_template_id')
+                            or enrollment.get('course_id')
+                            or enrollment.get('learnable_id')
+                        )
+                        if not enrollment_id or not course_id:
+                            continue
+                        if requested_course_ids and str(course_id) not in seen_requested_course_ids:
+                            continue
+
+                        cert_link = f"https://{subdomain}.bridgeapp.com/author/courses/{course_id}/enrollments/{enrollment_id}/certificate"
+                        cert_meta = bridge_api.get_author_certificate_data(subdomain, course_id, enrollment_id)
+                        if not cert_meta:
+                            cert_meta = bridge_api.get_learner_certificate_data(subdomain, course_id, enrollment_id)
+                        if cert_meta:
+                            for cert in cert_meta:
+                                certificate_records.append({
+                                    'email': email,
+                                    'subdomain': subdomain,
+                                    'course_id': course_id,
+                                    'enrollment_id': enrollment_id,
+                                    'certificate_url': cert_link,
+                                    'issuer': cert.get('issuer', ''),
+                                    'learnable_title': cert.get('learnable_title', ''),
+                                    'earned_at': cert.get('earned_at', ''),
+                                    'recipient': cert.get('recipient', ''),
+                                    'score': cert.get('score', ''),
+                                    'course': cert.get('course', ''),
+                                })
+                            certificate_links.append({
+                                'email': email,
+                                'subdomain': subdomain,
+                                'course_id': course_id,
+                                'enrollment_id': enrollment_id,
+                                'certificate_url': cert_link,
+                            })
+                            user_exported += 1
+
+                        cert_pdf = bridge_api.download_certificate_author_pdf(
+                            subdomain=subdomain,
+                            course_id=course_id,
+                            enrollment_id=enrollment_id
+                        )
+                        if not cert_pdf:
+                            cert_pdf = bridge_api.download_certificate_pdf(subdomain, course_id, enrollment_id)
+                        if not cert_pdf:
+                            continue
+
+                        course_slug = _safe_file_name(str(course_id))
+                        email_slug = _safe_file_name(email)
+                        file_name = f"{email_slug}/course_{course_slug}_enrollment_{enrollment_id}.pdf"
+                        zf.writestr(file_name, cert_pdf)
+                        exported_files += 1
                         user_exported += 1
 
-                    cert_pdf = bridge_api.download_certificate_author_pdf(
-                        subdomain=subdomain,
-                        course_id=course_id,
-                        enrollment_id=enrollment_id
-                    )
-                    if not cert_pdf:
-                        cert_pdf = bridge_api.download_certificate_pdf(subdomain, course_id, enrollment_id)
-                    if not cert_pdf:
-                        continue
+                # Fallback for tenants where user enrollment APIs are unavailable:
+                # use author/course_templates/{course_id}/enrollments and match this user.
+                if user_exported == 0:
+                    package_course_ids = []
+                    subaccount_course_ids = []
+                    admin_course_ids = []
 
-                    course_slug = _safe_file_name(str(course_id))
-                    email_slug = _safe_file_name(email)
-                    file_name = f"{email_slug}/course_{course_slug}_enrollment_{enrollment_id}.pdf"
-                    zf.writestr(file_name, cert_pdf)
-                    exported_files += 1
-                    user_exported += 1
+                    if requested_course_ids:
+                        admin_course_ids = list(requested_course_ids)
+                    else:
+                        if account.prefix:
+                            package = Package.objects.filter(prefix=account.prefix, active=True).order_by('id').first()
+                            if package:
+                                package_course_ids = list(
+                                    package.courses.filter(active=True).values_list('bridge_id', flat=True)
+                                )
 
-            # Fallback for tenants where user enrollment APIs are unavailable:
-            # use author/course_templates/{course_id}/enrollments and match this user.
-            if user_exported == 0:
-                package_course_ids = []
-                subaccount_course_ids = []
-                admin_course_ids = []
-
-                if requested_course_ids:
-                    admin_course_ids = list(requested_course_ids)
-                else:
-                    if account.prefix:
-                        package = Package.objects.filter(prefix=account.prefix, active=True).order_by('id').first()
-                        if package:
+                        if not package_course_ids:
                             package_course_ids = list(
-                                package.courses.filter(active=True).values_list('bridge_id', flat=True)
+                                Package.objects.filter(active=True)
+                                .values_list('courses__bridge_id', flat=True)
+                                .distinct()
+                            )
+                            package_course_ids = [cid for cid in package_course_ids if cid]
+
+                        try:
+                            sub_courses = bridge_api.list_subaccount_courses(subdomain, limit=2000)
+                            subaccount_course_ids = [
+                                c.get('id') for c in sub_courses if c.get('id') is not None
+                            ]
+                        except Exception as e:
+                            logger.debug(f"Subaccount course listing failed for certificate export ({subdomain}): {e}")
+
+                        try:
+                            admin_course_ids = bridge_api.get_admin_learner_course_ids(
+                                subdomain=subdomain,
+                                learner_id=bridge_user_id,
+                                limit=500
+                            )
+                        except Exception as e:
+                            logger.debug(
+                                f"Admin learner course-id fallback failed for {email} ({subdomain}): {e}"
                             )
 
-                    # As a safety fallback, include any active package courses if prefix package is empty.
-                    if not package_course_ids:
-                        package_course_ids = list(
-                            Package.objects.filter(active=True)
-                            .values_list('courses__bridge_id', flat=True)
-                            .distinct()
+                    merged_course_ids = []
+                    seen_course_ids = set()
+                    base_course_ids = list(admin_course_ids) if admin_course_ids else (
+                        list(package_course_ids) + list(subaccount_course_ids)
+                    )
+                    for cid in base_course_ids:
+                        cid_s = str(cid)
+                        if not cid_s or cid_s in seen_course_ids:
+                            continue
+                        seen_course_ids.add(cid_s)
+                        merged_course_ids.append(cid_s)
+
+                    logger.info(
+                        f"Certificate export fallback for {email}: trying author enrollment lookup across "
+                        f"{len(merged_course_ids)} course IDs (bridge_user_id={bridge_user_id}, "
+                        f"source={'request_course_ids' if requested_course_ids else ('admin_learner_page' if admin_course_ids else 'package+subaccount')})"
+                    )
+                    for course_id in merged_course_ids:
+                        cert_link_learner = (
+                            f"https://{subdomain}.bridgeapp.com/learner/courses/{course_id}/certificate/{bridge_user_id}"
                         )
-                        package_course_ids = [cid for cid in package_course_ids if cid]
-
-                    # If package mappings miss tenant-specific courses, also scan subaccount courses.
-                    try:
-                        sub_courses = bridge_api.list_subaccount_courses(subdomain, limit=2000)
-                        subaccount_course_ids = [
-                            c.get('id') for c in sub_courses if c.get('id') is not None
-                        ]
-                    except Exception as e:
-                        logger.debug(f"Subaccount course listing failed for certificate export ({subdomain}): {e}")
-
-                    # Try to get user-specific course ids from admin learner page first.
-                    try:
-                        admin_course_ids = bridge_api.get_admin_learner_course_ids(
+                        cert_meta_learner = bridge_api.get_learner_certificate_data(
                             subdomain=subdomain,
-                            learner_id=bridge_user_id,
-                            limit=500
+                            course_id=course_id,
+                            learner_id_or_enrollment_id=bridge_user_id
                         )
-                    except Exception as e:
-                        logger.debug(
-                            f"Admin learner course-id fallback failed for {email} ({subdomain}): {e}"
-                        )
-
-                # Keep order stable and remove duplicates.
-                merged_course_ids = []
-                seen_course_ids = set()
-                base_course_ids = list(admin_course_ids) if admin_course_ids else (
-                    list(package_course_ids) + list(subaccount_course_ids)
-                )
-                for cid in base_course_ids:
-                    cid_s = str(cid)
-                    if not cid_s or cid_s in seen_course_ids:
-                        continue
-                    seen_course_ids.add(cid_s)
-                    merged_course_ids.append(cid_s)
-
-                logger.info(
-                    f"Certificate export fallback for {email}: trying author enrollment lookup across "
-                    f"{len(merged_course_ids)} course IDs (bridge_user_id={bridge_user_id}, "
-                    f"source={'request_course_ids' if requested_course_ids else ('admin_learner_page' if admin_course_ids else 'package+subaccount')})"
-                )
-                for course_id in merged_course_ids:
-                    # Try learner certificate API directly with learner/user id first.
-                    # This avoids requiring enrollment listing for many tenants.
-                    cert_link_learner = (
-                        f"https://{subdomain}.bridgeapp.com/learner/courses/{course_id}/certificate/{bridge_user_id}"
-                    )
-                    cert_meta_learner = bridge_api.get_learner_certificate_data(
-                        subdomain=subdomain,
-                        course_id=course_id,
-                        learner_id_or_enrollment_id=bridge_user_id
-                    )
-                    if cert_meta_learner:
-                        for cert in cert_meta_learner:
-                            certificate_records.append({
+                        if cert_meta_learner:
+                            for cert in cert_meta_learner:
+                                certificate_records.append({
+                                    'email': email,
+                                    'subdomain': subdomain,
+                                    'course_id': course_id,
+                                    'enrollment_id': '',
+                                    'certificate_url': cert_link_learner,
+                                    'issuer': cert.get('issuer', ''),
+                                    'learnable_title': cert.get('learnable_title', ''),
+                                    'earned_at': cert.get('earned_at', ''),
+                                    'recipient': cert.get('recipient', ''),
+                                    'score': cert.get('score', ''),
+                                    'course': cert.get('course', ''),
+                                })
+                            certificate_links.append({
                                 'email': email,
                                 'subdomain': subdomain,
                                 'course_id': course_id,
                                 'enrollment_id': '',
                                 'certificate_url': cert_link_learner,
-                                'issuer': cert.get('issuer', ''),
-                                'learnable_title': cert.get('learnable_title', ''),
-                                'earned_at': cert.get('earned_at', ''),
-                                'recipient': cert.get('recipient', ''),
-                                'score': cert.get('score', ''),
-                                'course': cert.get('course', ''),
                             })
-                        certificate_links.append({
-                            'email': email,
-                            'subdomain': subdomain,
-                            'course_id': course_id,
-                            'enrollment_id': '',
-                            'certificate_url': cert_link_learner,
-                        })
-                        user_exported += 1
+                            user_exported += 1
 
-                        cert_pdf = bridge_api.download_certificate_pdf(
+                            cert_pdf = bridge_api.download_certificate_pdf(
+                                subdomain=subdomain,
+                                course_id=course_id,
+                                certificate_ref_id=bridge_user_id
+                            )
+                            if cert_pdf:
+                                course_slug = _safe_file_name(str(course_id))
+                                email_slug = _safe_file_name(email)
+                                file_name = f"{email_slug}/course_{course_slug}_learner_{bridge_user_id}.pdf"
+                                zf.writestr(file_name, cert_pdf)
+                                exported_files += 1
+
+                        enrollment = bridge_api.find_user_enrollment_for_course(
                             subdomain=subdomain,
                             course_id=course_id,
-                            certificate_ref_id=bridge_user_id
+                            user_id=bridge_user_id,
+                            email=email
                         )
-                        if cert_pdf:
-                            course_slug = _safe_file_name(str(course_id))
-                            email_slug = _safe_file_name(email)
-                            file_name = f"{email_slug}/course_{course_slug}_learner_{bridge_user_id}.pdf"
-                            zf.writestr(file_name, cert_pdf)
-                            exported_files += 1
+                        if not enrollment:
+                            continue
 
-                    enrollment = bridge_api.find_user_enrollment_for_course(
-                        subdomain=subdomain,
-                        course_id=course_id,
-                        user_id=bridge_user_id,
-                        email=email
-                    )
-                    if not enrollment:
-                        continue
+                        enrollment_id = enrollment.get('id')
+                        if not enrollment_id:
+                            continue
 
-                    enrollment_id = enrollment.get('id')
-                    if not enrollment_id:
-                        continue
-
-                    cert_link = f"https://{subdomain}.bridgeapp.com/author/courses/{course_id}/enrollments/{enrollment_id}/certificate"
-                    cert_meta = bridge_api.get_author_certificate_data(subdomain, course_id, enrollment_id)
-                    if not cert_meta:
-                        cert_meta = bridge_api.get_learner_certificate_data(subdomain, course_id, enrollment_id)
-                    if cert_meta:
-                        for cert in cert_meta:
-                            certificate_records.append({
+                        cert_link = f"https://{subdomain}.bridgeapp.com/author/courses/{course_id}/enrollments/{enrollment_id}/certificate"
+                        cert_meta = bridge_api.get_author_certificate_data(subdomain, course_id, enrollment_id)
+                        if not cert_meta:
+                            cert_meta = bridge_api.get_learner_certificate_data(subdomain, course_id, enrollment_id)
+                        if cert_meta:
+                            for cert in cert_meta:
+                                certificate_records.append({
+                                    'email': email,
+                                    'subdomain': subdomain,
+                                    'course_id': course_id,
+                                    'enrollment_id': enrollment_id,
+                                    'certificate_url': cert_link,
+                                    'issuer': cert.get('issuer', ''),
+                                    'learnable_title': cert.get('learnable_title', ''),
+                                    'earned_at': cert.get('earned_at', ''),
+                                    'recipient': cert.get('recipient', ''),
+                                    'score': cert.get('score', ''),
+                                    'course': cert.get('course', ''),
+                                })
+                            certificate_links.append({
                                 'email': email,
                                 'subdomain': subdomain,
                                 'course_id': course_id,
                                 'enrollment_id': enrollment_id,
                                 'certificate_url': cert_link,
-                                'issuer': cert.get('issuer', ''),
-                                'learnable_title': cert.get('learnable_title', ''),
-                                'earned_at': cert.get('earned_at', ''),
-                                'recipient': cert.get('recipient', ''),
-                                'score': cert.get('score', ''),
-                                'course': cert.get('course', ''),
                             })
+                            user_exported += 1
+
+                        cert_pdf = bridge_api.download_certificate_author_pdf(
+                            subdomain=subdomain,
+                            course_id=course_id,
+                            enrollment_id=enrollment_id
+                        )
+                        if not cert_pdf:
+                            cert_pdf = bridge_api.download_certificate_pdf(subdomain, course_id, bridge_user_id)
+                            if not cert_pdf:
+                                continue
+
+                        course_slug = _safe_file_name(str(course_id))
+                        email_slug = _safe_file_name(email)
+                        file_name = f"{email_slug}/course_{course_slug}_enrollment_{enrollment_id}.pdf"
+                        zf.writestr(file_name, cert_pdf)
+                        exported_files += 1
+                        user_exported += 1
+
+                if user_exported == 0 and bridge_user_id:
+                    admin_links = bridge_api.get_admin_learner_certificate_links(subdomain, bridge_user_id)
+                    for item in admin_links:
+                        course_id = item.get('course_id')
+                        enrollment_id = item.get('enrollment_id')
+                        cert_link = item.get('url')
+                        if not course_id or not enrollment_id or not cert_link:
+                            continue
+                        if requested_course_ids and str(course_id) not in seen_requested_course_ids:
+                            continue
+
                         certificate_links.append({
                             'email': email,
                             'subdomain': subdomain,
@@ -1820,96 +1980,58 @@ def export_certificates(request):
                         })
                         user_exported += 1
 
-                    cert_pdf = bridge_api.download_certificate_author_pdf(
-                        subdomain=subdomain,
-                        course_id=course_id,
-                        enrollment_id=enrollment_id
-                    )
-                    if not cert_pdf:
-                        # Last-ditch fallback for tenants that expose learner cert by user id.
-                        cert_pdf = bridge_api.download_certificate_pdf(subdomain, course_id, bridge_user_id)
+                        cert_meta = bridge_api.get_author_certificate_data(subdomain, course_id, enrollment_id)
+                        if not cert_meta:
+                            cert_meta = bridge_api.get_learner_certificate_data(subdomain, course_id, enrollment_id)
+                        if cert_meta:
+                            for cert in cert_meta:
+                                certificate_records.append({
+                                    'email': email,
+                                    'subdomain': subdomain,
+                                    'course_id': course_id,
+                                    'enrollment_id': enrollment_id,
+                                    'certificate_url': cert_link,
+                                    'issuer': cert.get('issuer', ''),
+                                    'learnable_title': cert.get('learnable_title', ''),
+                                    'earned_at': cert.get('earned_at', ''),
+                                    'recipient': cert.get('recipient', ''),
+                                    'score': cert.get('score', ''),
+                                    'course': cert.get('course', ''),
+                                })
+
+                        cert_pdf = bridge_api.download_certificate_author_pdf(
+                            subdomain=subdomain,
+                            course_id=course_id,
+                            enrollment_id=enrollment_id
+                        )
                         if not cert_pdf:
                             continue
 
-                    course_slug = _safe_file_name(str(course_id))
-                    email_slug = _safe_file_name(email)
-                    file_name = f"{email_slug}/course_{course_slug}_enrollment_{enrollment_id}.pdf"
-                    zf.writestr(file_name, cert_pdf)
-                    exported_files += 1
-                    user_exported += 1
+                        course_slug = _safe_file_name(str(course_id))
+                        email_slug = _safe_file_name(email)
+                        file_name = f"{email_slug}/course_{course_slug}_enrollment_{enrollment_id}.pdf"
+                        zf.writestr(file_name, cert_pdf)
+                        exported_files += 1
 
-            # Last fallback: parse admin learner page HTML for direct certificate links.
-            # This follows the UI flow user confirmed:
-            # /admin/learner/{id} -> "View Certificate" -> /author/courses/{course}/enrollments/{enr}/certificate
-            if user_exported == 0 and bridge_user_id:
-                admin_links = bridge_api.get_admin_learner_certificate_links(subdomain, bridge_user_id)
-                for item in admin_links:
-                    course_id = item.get('course_id')
-                    enrollment_id = item.get('enrollment_id')
-                    cert_link = item.get('url')
-                    if not course_id or not enrollment_id or not cert_link:
-                        continue
-
-                    certificate_links.append({
+                if user_exported > 0:
+                    user_summary.append({
                         'email': email,
-                        'subdomain': subdomain,
-                        'course_id': course_id,
-                        'enrollment_id': enrollment_id,
-                        'certificate_url': cert_link,
+                        'status': 'exported',
+                        'count': user_exported,
+                        'subdomain': subdomain
                     })
-                    user_exported += 1
-
-                    cert_meta = bridge_api.get_author_certificate_data(subdomain, course_id, enrollment_id)
-                    if not cert_meta:
-                        cert_meta = bridge_api.get_learner_certificate_data(subdomain, course_id, enrollment_id)
-                    if cert_meta:
-                        for cert in cert_meta:
-                            certificate_records.append({
-                                'email': email,
-                                'subdomain': subdomain,
-                                'course_id': course_id,
-                                'enrollment_id': enrollment_id,
-                                'certificate_url': cert_link,
-                                'issuer': cert.get('issuer', ''),
-                                'learnable_title': cert.get('learnable_title', ''),
-                                'earned_at': cert.get('earned_at', ''),
-                                'recipient': cert.get('recipient', ''),
-                                'score': cert.get('score', ''),
-                                'course': cert.get('course', ''),
-                            })
-
-                    cert_pdf = bridge_api.download_certificate_author_pdf(
-                        subdomain=subdomain,
-                        course_id=course_id,
-                        enrollment_id=enrollment_id
-                    )
-                    if not cert_pdf:
-                        continue
-
-                    course_slug = _safe_file_name(str(course_id))
-                    email_slug = _safe_file_name(email)
-                    file_name = f"{email_slug}/course_{course_slug}_enrollment_{enrollment_id}.pdf"
-                    zf.writestr(file_name, cert_pdf)
-                    exported_files += 1
-
-            if user_exported > 0:
-                user_summary.append({
-                    'email': email,
-                    'status': 'exported',
-                    'count': user_exported,
-                    'subdomain': subdomain
-                })
-            else:
-                user_summary.append({
-                    'email': email,
-                    'status': 'no_certificates_found',
-                    'subdomain': subdomain
-                })
+                else:
+                    user_summary.append({
+                        'email': email,
+                        'status': 'no_certificates_found',
+                        'subdomain': subdomain
+                    })
 
         # Include a summary report in the ZIP for visibility
         summary_lines = [
             f"Generated at: {datetime.utcnow().isoformat()}Z",
             f"Requested users: {len(emails)}",
+            f"Requested courses: {len(requested_course_ids)}",
             f"Exported files: {exported_files}",
             f"Certificate links: {len(certificate_links)}",
             f"Certificate metadata rows: {len(certificate_records)}",
