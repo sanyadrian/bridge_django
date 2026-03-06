@@ -256,16 +256,25 @@ def authorize(request):
                 if not account:
                     account = OHSAccount.objects.filter(unique_id=login_email, is_active=True).first()
                 if account:
-                    logger.warning(
-                        f"OIDC authorize: blocked email-form login for portal account "
-                        f"{account.unique_id}. Must use portal button."
-                    )
-                    login_form_error_msg = (
-                        '<p style="color:#c0392b;margin-top:10px;">'
-                        'Sorry, this account must be logged in via the portal button.'
-                        '</p>'
-                    )
-                    account = None
+                    # Block only portal-managed accounts. URL-only auto-imported accounts
+                    # should continue to work via direct URL/email form login.
+                    is_portal_managed = bool(account.bridge_account_id)
+                    if is_portal_managed:
+                        logger.warning(
+                            f"OIDC authorize: blocked email-form login for portal account "
+                            f"{account.unique_id}. Must use portal button."
+                        )
+                        login_form_error_msg = (
+                            '<p style="color:#c0392b;margin-top:10px;">'
+                            'Sorry, this account must be logged in via the portal button.'
+                            '</p>'
+                        )
+                        account = None
+                    else:
+                        logger.info(
+                            f"OIDC authorize: allowing email-form login for non-portal account "
+                            f"{account.unique_id} (bridge_account_id is empty)"
+                        )
                 else:
                     # Auto-import: user not in Django but might exist in Bridge subaccount
                     import_subdomain = request.POST.get('origin_subdomain', '').strip() or origin_subdomain
