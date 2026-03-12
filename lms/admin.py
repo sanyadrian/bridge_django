@@ -64,7 +64,7 @@ class OHSAccountAdmin(PrefixSelectionMixin, admin.ModelAdmin):
         }),
     )
     
-    actions = ['sync_sso_selected']
+    actions = ['sync_sso_selected', 'assign_package_content_selected']
     
     def sync_sso_selected(self, request, queryset):
         """Admin action to sync SSO for selected accounts."""
@@ -128,6 +128,156 @@ class OHSAccountAdmin(PrefixSelectionMixin, admin.ModelAdmin):
             f"SSO sync completed: {success_count} succeeded, {failed_count} failed, {skipped_count} skipped",
             level='success')
     sync_sso_selected.short_description = "Sync SSO for selected accounts"
+
+    def assign_package_content_selected(self, request, queryset):
+        """
+        Admin action to manually assign package courses/programs to selected subaccounts.
+        Safe to re-run; affiliations are idempotent on Bridge side.
+        """
+        from urllib.parse import urlparse
+        from .bridge_api import BridgeAPI, BridgeAPIError
+
+        bridge_api = BridgeAPI()
+        processed_subdomains = set()
+        success_count = 0
+        failed_count = 0
+        skipped_count = 0
+
+        def _chunks(items, size):
+            for i in range(0, len(items), size):
+                yield items[i:i + size]
+
+        BATCH_SIZE = 25
+
+        for account in queryset:
+            try:
+                prefix = (account.prefix or '').strip().lower()
+                if prefix not in ['ohsi', 'hri', 'ilt']:
+                    skipped_count += 1
+                    self.message_user(
+                        request,
+                        f"Skipped {account.unique_id}: missing/invalid prefix.",
+                        level='warning'
+                    )
+                    continue
+
+                # Resolve subdomain from explicit field first, then unique_url fallback.
+                subdomain = (account.bridge_subaccount_id or '').strip()
+                if not subdomain and account.unique_url:
+                    parsed = urlparse(account.unique_url)
+                    subdomain = (parsed.netloc.split('.')[0] or '').strip()
+                if not subdomain:
+                    skipped_count += 1
+                    self.message_user(
+                        request,
+                        f"Skipped {account.unique_id}: no Bridge subaccount ID/URL.",
+                        level='warning'
+                    )
+                    continue
+
+                # Avoid duplicate assignment runs for the same subdomain in one action.
+                if subdomain in processed_subdomains:
+                    skipped_count += 1
+                    continue
+
+                package = Package.objects.filter(prefix=prefix, active=True).order_by('id').first()
+                if not package:
+                    skipped_count += 1
+                    self.message_user(
+                        request,
+                        f"Skipped {subdomain}: no active package found for prefix '{prefix}'.",
+                        level='warning'
+                    )
+                    continue
+
+                # Resolve numeric Bridge subaccount ID needed for affiliations.
+                subaccount_id = account.bridge_account_id
+                if not subaccount_id:
+                    subaccount = bridge_api.get_subaccount(subdomain)
+                    if not subaccount or not subaccount.get('id'):
+                        failed_count += 1
+                        self.message_user(
+                            request,
+                            f"Failed {subdomain}: could not resolve Bridge subaccount ID.",
+                            level='warning'
+                        )
+                        continue
+                    subaccount_id = subaccount.get('id')
+                    account.bridge_account_id = subaccount_id
+                    if not account.bridge_subaccount_id:
+                        account.bridge_subaccount_id = subdomain
+                    account.save(update_fields=['bridge_account_id', 'bridge_subaccount_id', 'updated_at'])
+
+                courses = [str(c) for c in package.courses.filter(active=True).values_list('bridge_id', flat=True) if c]
+                programs = [str(p) for p in package.programs.filter(active=True).values_list('bridge_id', flat=True) if p]
+
+                affiliations = (
+                    [{'item_type': 'CourseTemplate', 'item_id': cid, 'domain_id': str(subaccount_id)} for cid in courses] +
+                    [{'item_type': 'Program', 'item_id': pid, 'domain_id': str(subaccount_id)} for pid in programs]
+                )
+
+                if not affiliations:
+                    skipped_count += 1
+                    self.message_user(
+                        request,
+                        f"Skipped {subdomain}: package '{package.name}' has no active courses/programs.",
+                        level='warning'
+                    )
+                    processed_subdomains.add(subdomain)
+                    continue
+
+                item_failures = 0
+                for batch in _chunks(affiliations, BATCH_SIZE):
+                    try:
+                        bridge_api.set_affiliations_batch(batch, on=True)
+                    except Exception:
+                        # Fallback to per-item assignment for better resiliency.
+                        for item in batch:
+                            try:
+                                if item['item_type'] == 'CourseTemplate':
+                                    bridge_api.set_course_affiliation(
+                                        course_id=int(item['item_id']),
+                                        subaccount_id=int(item['domain_id']),
+                                        on=True
+                                    )
+                                else:
+                                    bridge_api.set_program_affiliation(
+                                        program_id=int(item['item_id']),
+                                        subaccount_id=int(item['domain_id']),
+                                        on=True
+                                    )
+                            except BridgeAPIError:
+                                item_failures += 1
+
+                processed_subdomains.add(subdomain)
+                if item_failures > 0:
+                    failed_count += 1
+                    self.message_user(
+                        request,
+                        f"Partial assignment for {subdomain}: {item_failures} item(s) failed.",
+                        level='warning'
+                    )
+                else:
+                    success_count += 1
+
+            except Exception as e:
+                failed_count += 1
+                self.message_user(
+                    request,
+                    f"Error assigning package for {account.unique_id}: {str(e)}",
+                    level='warning'
+                )
+
+        self.message_user(
+            request,
+            (
+                "Package assignment completed: "
+                f"{success_count} succeeded, {failed_count} failed, {skipped_count} skipped, "
+                f"{len(processed_subdomains)} unique subaccount(s) processed."
+            ),
+            level='success'
+        )
+    assign_package_content_selected.short_description = "Assign package content for selected accounts"
 
 
 @admin.register(OHSAuth)
