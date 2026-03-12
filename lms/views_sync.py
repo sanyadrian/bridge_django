@@ -10,6 +10,7 @@ import logging
 from urllib.parse import urlencode
 
 from django.conf import settings
+from django.core.cache import cache
 from django.db import models
 from django.http import JsonResponse, HttpResponseBadRequest
 from django.views.decorators.csrf import csrf_exempt
@@ -357,133 +358,156 @@ def sync_user_to_bridge(request):
                 prefix=prefix if prefix in ['ohsi', 'hri', 'ilt'] else None,
             )
 
-        # Auto-assign package courses and programs to subaccount based on prefix
-        # ONLY for newly created subaccounts
+        # Auto-assign package courses and programs to subaccount based on prefix.
+        # Runs for new subaccounts and can self-heal existing ones on later syncs.
         #
         # IMPORTANT: This runs AFTER Bridge user + OHSAccount are created, so even if package assignment
         # fails/times out, /auth/<email>/ will still work (no more "No OHSAccount matches..." errors).
-        if subaccount_created and subaccount and subaccount.get('id'):
-            try:
-                subaccount_id = subaccount.get('id')
-                subaccount_name = subaccount.get('name', '')
+        if subaccount and subaccount.get('id'):
+            lock_key = f"ohs:package_sync_lock:{bridge_subaccount_id}"
+            done_key = f"ohs:package_sync_done:{bridge_subaccount_id}"
+            should_attempt_package_sync = (
+                subaccount_created or user_created or not cache.get(done_key)
+            )
 
-                # If prefix not provided, try to extract from subaccount name
-                # Format: "OHSI - Company Name" or "HRI - Company Name" or "ILT - Company Name"
-                if not prefix or prefix not in ['ohsi', 'hri', 'ilt']:
-                    if ' - ' in subaccount_name:
-                        extracted_prefix = subaccount_name.split(' - ')[0].lower()
-                        if extracted_prefix in ['ohsi', 'hri', 'ilt']:
-                            prefix = extracted_prefix
-                            logger.info(f"Extracted prefix '{prefix}' from subaccount name: {subaccount_name}")
-                    else:
-                        # Try to extract from subdomain: "ohsi-company-safetynow"
-                        subdomain_parts = bridge_subaccount_id.split('-')
-                        if len(subdomain_parts) > 0 and subdomain_parts[0] in ['ohsi', 'hri', 'ilt']:
-                            prefix = subdomain_parts[0]
-                            logger.info(f"Extracted prefix '{prefix}' from subdomain: {bridge_subaccount_id}")
+            if not should_attempt_package_sync:
+                logger.info(
+                    f"Skipping package assignment for {bridge_subaccount_id}: "
+                    "recent successful sync marker exists"
+                )
+            elif not cache.add(lock_key, '1', timeout=180):
+                logger.info(
+                    f"Skipping package assignment for {bridge_subaccount_id}: "
+                    "another sync process is already running"
+                )
+            else:
+                package_sync_success = False
+                try:
+                    subaccount_id = subaccount.get('id')
+                    subaccount_name = subaccount.get('name', '')
 
-                if not prefix or prefix not in ['ohsi', 'hri', 'ilt']:
-                    logger.warning(f"Could not determine prefix for subaccount {bridge_subaccount_id} - skipping package assignment")
-                    logger.warning(f"Subaccount name: {subaccount_name}, Subdomain: {bridge_subaccount_id}")
-                else:
-                    logger.info(f"Assigning package to NEWLY CREATED subaccount {bridge_subaccount_id} (ID: {subaccount_id}) based on prefix: {prefix}")
-
-                    # Find package by prefix
-                    package = Package.objects.filter(prefix=prefix, active=True).order_by('id').first()
-                    if not package:
-                        logger.warning(f"No active package found for prefix '{prefix}' - skipping package assignment")
-                    else:
-                        courses = list(package.courses.filter(active=True).values_list('bridge_id', flat=True))
-                        programs = list(package.programs.filter(active=True).values_list('bridge_id', flat=True))
-                        logger.info(f"Found package: {package.name} with {len(courses)} courses and {len(programs)} programs")
-
-                        def _chunks(items, size):
-                            for i in range(0, len(items), size):
-                                yield items[i:i + size]
-
-                        # Bridge API limit: max 25 affiliations per batch
-                        BATCH_SIZE = 25
-
-                        # Batch share courses (fast)
-                        if courses:
-                            course_affiliations = [
-                                {'item_type': 'CourseTemplate', 'item_id': str(cid), 'domain_id': str(subaccount_id)}
-                                for cid in courses
-                            ]
-                            batch_num = 0
-                            total_batches = (len(course_affiliations) + BATCH_SIZE - 1) // BATCH_SIZE
-                            courses_assigned = 0
-                            courses_failed = 0
-                            
-                            for batch in _chunks(course_affiliations, BATCH_SIZE):
-                                batch_num += 1
-                                logger.info(f"  Sharing batch {batch_num}/{total_batches} of courses ({len(batch)} courses)...")
-                                try:
-                                    bridge_api.set_affiliations_batch(batch, on=True)
-                                    courses_assigned += len(batch)
-                                except BridgeAPIError as batch_error:
-                                    logger.warning(f"  Batch {batch_num} failed, trying individual assignments...")
-                                    # Fallback to individual assignments if batch fails
-                                    for affiliation in batch:
-                                        try:
-                                            bridge_api.set_course_affiliation(
-                                                course_id=int(affiliation['item_id']),
-                                                subaccount_id=int(affiliation['domain_id']),
-                                                on=True
-                                            )
-                                            courses_assigned += 1
-                                        except BridgeAPIError as individual_error:
-                                            courses_failed += 1
-                                            logger.warning(f"    Failed to assign course {affiliation['item_id']}: {str(individual_error)}")
-                            
-                            logger.info(f"✓ Shared {courses_assigned} courses to subaccount ({courses_failed} failed) in {total_batches} batch(es)")
-                            logger.info(f"  Note: Course relevance ('Available in Library') can be set manually via Bridge UI if needed")
+                    # If prefix not provided, try to extract from subaccount name
+                    # Format: "OHSI - Company Name" or "HRI - Company Name" or "ILT - Company Name"
+                    if not prefix or prefix not in ['ohsi', 'hri', 'ilt']:
+                        if ' - ' in subaccount_name:
+                            extracted_prefix = subaccount_name.split(' - ')[0].lower()
+                            if extracted_prefix in ['ohsi', 'hri', 'ilt']:
+                                prefix = extracted_prefix
+                                logger.info(f"Extracted prefix '{prefix}' from subaccount name: {subaccount_name}")
                         else:
-                            logger.info("  No courses to share")
+                            # Try to extract from subdomain: "ohsi-company-safetynow"
+                            subdomain_parts = bridge_subaccount_id.split('-')
+                            if len(subdomain_parts) > 0 and subdomain_parts[0] in ['ohsi', 'hri', 'ilt']:
+                                prefix = subdomain_parts[0]
+                                logger.info(f"Extracted prefix '{prefix}' from subdomain: {bridge_subaccount_id}")
 
-                        # Batch share programs (fast)
-                        if programs:
-                            program_affiliations = [
-                                {'item_type': 'Program', 'item_id': str(pid), 'domain_id': str(subaccount_id)}
-                                for pid in programs
-                            ]
-                            batch_num = 0
-                            total_batches = (len(program_affiliations) + BATCH_SIZE - 1) // BATCH_SIZE
-                            programs_assigned = 0
-                            programs_failed = 0
-                            
-                            for batch in _chunks(program_affiliations, BATCH_SIZE):
-                                batch_num += 1
-                                logger.info(f"  Sharing batch {batch_num}/{total_batches} of programs ({len(batch)} programs)...")
-                                try:
-                                    bridge_api.set_affiliations_batch(batch, on=True)
-                                    programs_assigned += len(batch)
-                                except BridgeAPIError as batch_error:
-                                    logger.warning(f"  Batch {batch_num} failed, trying individual assignments...")
-                                    # Fallback to individual assignments if batch fails
-                                    for affiliation in batch:
-                                        try:
-                                            bridge_api.set_program_affiliation(
-                                                program_id=int(affiliation['item_id']),
-                                                subaccount_id=int(affiliation['domain_id']),
-                                                on=True
-                                            )
-                                            programs_assigned += 1
-                                        except BridgeAPIError as individual_error:
-                                            programs_failed += 1
-                                            logger.warning(f"    Failed to assign program {affiliation['item_id']}: {str(individual_error)}")
-                            
-                            logger.info(f"✓ Shared {programs_assigned} programs to subaccount ({programs_failed} failed) in {total_batches} batch(es)")
+                    if not prefix or prefix not in ['ohsi', 'hri', 'ilt']:
+                        logger.warning(f"Could not determine prefix for subaccount {bridge_subaccount_id} - skipping package assignment")
+                        logger.warning(f"Subaccount name: {subaccount_name}, Subdomain: {bridge_subaccount_id}")
+                    else:
+                        logger.info(f"Assigning package to subaccount {bridge_subaccount_id} (ID: {subaccount_id}) based on prefix: {prefix}")
+
+                        # Find package by prefix
+                        package = Package.objects.filter(prefix=prefix, active=True).order_by('id').first()
+                        if not package:
+                            logger.warning(f"No active package found for prefix '{prefix}' - skipping package assignment")
                         else:
-                            logger.info("  No programs to share")
+                            courses = list(package.courses.filter(active=True).values_list('bridge_id', flat=True))
+                            programs = list(package.programs.filter(active=True).values_list('bridge_id', flat=True))
+                            logger.info(f"Found package: {package.name} with {len(courses)} courses and {len(programs)} programs")
 
-                        logger.info("✓ Package assignment complete for NEW subaccount")
-                        logger.info("  Note: Courses/programs are now affiliated (accessible) to the subaccount.")
-                        logger.info("  Administrators can enroll learners from their Training tab.")
-            except Exception as package_error:
-                logger.error(f"✗ Failed to assign package to NEW subaccount {bridge_subaccount_id}: {str(package_error)}")
-                logger.exception("Full traceback:")
-                # Don't fail the whole process; package can be assigned manually if needed
+                            def _chunks(items, size):
+                                for i in range(0, len(items), size):
+                                    yield items[i:i + size]
+
+                            # Bridge API limit: max 25 affiliations per batch
+                            BATCH_SIZE = 25
+
+                            # Batch share courses (fast)
+                            if courses:
+                                course_affiliations = [
+                                    {'item_type': 'CourseTemplate', 'item_id': str(cid), 'domain_id': str(subaccount_id)}
+                                    for cid in courses
+                                ]
+                                batch_num = 0
+                                total_batches = (len(course_affiliations) + BATCH_SIZE - 1) // BATCH_SIZE
+                                courses_assigned = 0
+                                courses_failed = 0
+
+                                for batch in _chunks(course_affiliations, BATCH_SIZE):
+                                    batch_num += 1
+                                    logger.info(f"  Sharing batch {batch_num}/{total_batches} of courses ({len(batch)} courses)...")
+                                    try:
+                                        bridge_api.set_affiliations_batch(batch, on=True)
+                                        courses_assigned += len(batch)
+                                    except BridgeAPIError:
+                                        logger.warning(f"  Batch {batch_num} failed, trying individual assignments...")
+                                        # Fallback to individual assignments if batch fails
+                                        for affiliation in batch:
+                                            try:
+                                                bridge_api.set_course_affiliation(
+                                                    course_id=int(affiliation['item_id']),
+                                                    subaccount_id=int(affiliation['domain_id']),
+                                                    on=True
+                                                )
+                                                courses_assigned += 1
+                                            except BridgeAPIError as individual_error:
+                                                courses_failed += 1
+                                                logger.warning(f"    Failed to assign course {affiliation['item_id']}: {str(individual_error)}")
+
+                                logger.info(f"✓ Shared {courses_assigned} courses to subaccount ({courses_failed} failed) in {total_batches} batch(es)")
+                                logger.info("  Note: Course relevance ('Available in Library') can be set manually via Bridge UI if needed")
+                            else:
+                                logger.info("  No courses to share")
+
+                            # Batch share programs (fast)
+                            if programs:
+                                program_affiliations = [
+                                    {'item_type': 'Program', 'item_id': str(pid), 'domain_id': str(subaccount_id)}
+                                    for pid in programs
+                                ]
+                                batch_num = 0
+                                total_batches = (len(program_affiliations) + BATCH_SIZE - 1) // BATCH_SIZE
+                                programs_assigned = 0
+                                programs_failed = 0
+
+                                for batch in _chunks(program_affiliations, BATCH_SIZE):
+                                    batch_num += 1
+                                    logger.info(f"  Sharing batch {batch_num}/{total_batches} of programs ({len(batch)} programs)...")
+                                    try:
+                                        bridge_api.set_affiliations_batch(batch, on=True)
+                                        programs_assigned += len(batch)
+                                    except BridgeAPIError:
+                                        logger.warning(f"  Batch {batch_num} failed, trying individual assignments...")
+                                        # Fallback to individual assignments if batch fails
+                                        for affiliation in batch:
+                                            try:
+                                                bridge_api.set_program_affiliation(
+                                                    program_id=int(affiliation['item_id']),
+                                                    subaccount_id=int(affiliation['domain_id']),
+                                                    on=True
+                                                )
+                                                programs_assigned += 1
+                                            except BridgeAPIError as individual_error:
+                                                programs_failed += 1
+                                                logger.warning(f"    Failed to assign program {affiliation['item_id']}: {str(individual_error)}")
+
+                                logger.info(f"✓ Shared {programs_assigned} programs to subaccount ({programs_failed} failed) in {total_batches} batch(es)")
+                            else:
+                                logger.info("  No programs to share")
+
+                            logger.info("✓ Package assignment complete for subaccount")
+                            logger.info("  Note: Courses/programs are now affiliated (accessible) to the subaccount.")
+                            logger.info("  Administrators can enroll learners from their Training tab.")
+                            package_sync_success = True
+                except Exception as package_error:
+                    logger.error(f"✗ Failed to assign package to subaccount {bridge_subaccount_id}: {str(package_error)}")
+                    logger.exception("Full traceback:")
+                    # Don't fail the whole process; package can be assigned manually if needed
+                finally:
+                    cache.delete(lock_key)
+                    if package_sync_success:
+                        cache.set(done_key, '1', timeout=24 * 60 * 60)
         
         # Return success response
         return JsonResponse({

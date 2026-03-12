@@ -146,24 +146,31 @@ def authenticate_user(request, unique_id):
         
         account = None
         email = request.GET.get('email')
+
+        def _lookup_account_by_email(login_email):
+            if not login_email:
+                return None
+            try:
+                found = OHSAccount.objects.get(unique_id=login_email, is_active=True)
+                logger.info(f"Found account by email as unique_id: {login_email}")
+                return found
+            except OHSAccount.DoesNotExist:
+                try:
+                    found = OHSAccount.objects.get(user_email=login_email, is_active=True)
+                    logger.info(f"Found account by user_email field: {login_email}")
+                    return found
+                except OHSAccount.DoesNotExist:
+                    return None
+                except OHSAccount.MultipleObjectsReturned:
+                    found = OHSAccount.objects.filter(user_email=login_email, is_active=True).first()
+                    if found:
+                        logger.info(f"Found account by user_email (multiple existed): {login_email}")
+                    return found
         
         # FIRST: Try by email (since we now use email as unique_id)
         # This is the primary lookup method
         if email:
-            try:
-                account = OHSAccount.objects.get(unique_id=email, is_active=True)
-                logger.info(f"Found account by email as unique_id: {email}")
-            except OHSAccount.DoesNotExist:
-                # Also try by user_email field
-                try:
-                    account = OHSAccount.objects.get(user_email=email, is_active=True)
-                    logger.info(f"Found account by user_email field: {email}")
-                except OHSAccount.DoesNotExist:
-                    pass
-                except OHSAccount.MultipleObjectsReturned:
-                    # If multiple, get the first one
-                    account = OHSAccount.objects.filter(user_email=email, is_active=True).first()
-                    logger.info(f"Found account by user_email (multiple existed): {email}")
+            account = _lookup_account_by_email(email)
         
         # FALLBACK: Try by original unique_id (for backwards compatibility)
         if not account:
@@ -177,6 +184,24 @@ def authenticate_user(request, unique_id):
                 except OHSAccount.DoesNotExist:
                     continue
         
+        if not account and email:
+            # Sync can still be in-flight for a few seconds. Retry before failing.
+            max_attempts = 6
+            retry_delay_seconds = 2
+            for attempt in range(1, max_attempts + 1):
+                logger.info(
+                    f"Account not found yet for {email}; retrying lookup "
+                    f"({attempt}/{max_attempts}) after {retry_delay_seconds}s"
+                )
+                time.sleep(retry_delay_seconds)
+                account = _lookup_account_by_email(email)
+                if account:
+                    logger.info(
+                        f"Recovered account during retry window for {email} "
+                        f"on attempt {attempt}/{max_attempts}"
+                    )
+                    break
+
         if not account:
             logger.warning(f"Account not found for unique_id: {unique_id}")
             if email:
