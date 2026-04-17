@@ -244,6 +244,12 @@ class PendingOIDCLogin(models.Model):
     ip_address = models.GenericIPAddressField(db_index=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     consumed = models.BooleanField(default=False)
+    post_login_path = models.CharField(
+        max_length=500,
+        blank=True,
+        default='',
+        help_text='Optional Bridge path after SSO (e.g. /author/courses/123)',
+    )
     
     class Meta:
         db_table = 'pending_oidc_login'

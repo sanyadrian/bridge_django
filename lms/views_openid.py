@@ -199,6 +199,7 @@ def authorize(request):
         logger = logging.getLogger(__name__)
         
         account = None
+        pending_post_login_path = None  # from PendingOIDCLogin when IP fallback matches
         login_form_error_msg = ''
         origin_subdomain = request.session.get('oidc_origin_subdomain', '')
 
@@ -253,6 +254,7 @@ def authorize(request):
                     created_at__gte=cutoff
                 ).order_by('-created_at').first()
                 if pending:
+                    pending_post_login_path = (pending.post_login_path or '').strip() or None
                     account = pending.account
                     pending.consumed = True
                     pending.save()
@@ -387,6 +389,13 @@ def authorize(request):
             expires_at=expires_at
         )
         
+        # Resolve optional post-login path (admin /author/courses/... from portal) before logout clears session
+        from .views import validate_bridge_post_login_path
+        session_raw = request.session.pop('bridge_post_login_path', None)
+        resolved_post_path = validate_bridge_post_login_path(session_raw) if session_raw else None
+        if not resolved_post_path and pending_post_login_path:
+            resolved_post_path = validate_bridge_post_login_path(pending_post_login_path)
+        
         # Logout user from Django (security best practice)
         auth_logout(request)
         
@@ -401,14 +410,20 @@ def authorize(request):
         if '|' in decoded_state:
             state_path = decoded_state.split('|', 1)[0]
         
-        # If state looks like a path (starts with /), redirect to courses after OAuth
-        if state_path.startswith('/') and account.bridge_subaccount_id:
+        final_landing_path = None
+        if resolved_post_path:
+            final_landing_path = resolved_post_path
+        elif state_path.startswith('/'):
+            final_landing_path = state_path
+        
+        # If we have a landing path, send user there after OAuth (portal deep link or Bridge state)
+        if final_landing_path and account.bridge_subaccount_id:
             # Use the account's bridge_subaccount_id and ensure -safetynow suffix
             bridge_subdomain = account.bridge_subaccount_id
             if '-safetynow' not in bridge_subdomain:
                 bridge_subdomain = f"{bridge_subdomain}-safetynow"
             
-            bridge_courses_url = f"https://{bridge_subdomain}.bridgeapp.com{state_path}"
+            bridge_courses_url = f"https://{bridge_subdomain}.bridgeapp.com{final_landing_path}"
             
             # If redirect_uri is Bridge's central callback (auth.bridgeapp.com), 
             # we need to redirect there with the code, then Bridge will handle the rest

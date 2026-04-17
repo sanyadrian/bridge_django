@@ -21,6 +21,22 @@ from django.contrib.auth.models import User
 from .models import OHSAccount, OHSAuth, OHSAccessLog, BridgeSyncTask, PendingOIDCLogin
 
 
+def validate_bridge_post_login_path(path_raw):
+    """
+    Allow only Bridge admin course deep links: /author/courses/<digits>.
+    Returns normalized path (no trailing slash) or None.
+    """
+    if not path_raw or not isinstance(path_raw, str):
+        return None
+    path = path_raw.strip()
+    if not path.startswith('/'):
+        path = '/' + path
+    import re
+    if re.match(r'^/author/courses/\d+/?$', path):
+        return path.rstrip('/')
+    return None
+
+
 def get_client_ip(request):
     """Get client IP address from request."""
     x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
@@ -247,6 +263,10 @@ def authenticate_user(request, unique_id):
         # Store account info in session for OIDC endpoint
         request.session['ohs_account_id'] = account.id
         request.session['ohs_unique_id'] = account.unique_id
+        # Optional admin deep link after SSO (?bridge_path=/author/courses/5476)
+        _vpath = validate_bridge_post_login_path(request.GET.get('bridge_path', ''))
+        if _vpath:
+            request.session['bridge_post_login_path'] = _vpath
         request.session.save()  # Ensure session is saved
         
         # Also create a PendingOIDCLogin record as fallback
@@ -264,7 +284,12 @@ def authenticate_user(request, unique_id):
             # Mark any existing pending logins for this IP as consumed
             PendingOIDCLogin.objects.filter(ip_address=client_ip, consumed=False).update(consumed=True)
             # Create new pending login
-            PendingOIDCLogin.objects.create(account=account, ip_address=client_ip)
+            _post_path = _vpath or ''
+            PendingOIDCLogin.objects.create(
+                account=account,
+                ip_address=client_ip,
+                post_login_path=_post_path,
+            )
             logger.info(f"Created PendingOIDCLogin for {account.unique_id} from IP {client_ip}")
         except Exception as e:
             logger.warning(f"Failed to create PendingOIDCLogin: {e}")
@@ -274,13 +299,11 @@ def authenticate_user(request, unique_id):
         bridge_subdomain = account.bridge_subaccount_id
         if '-safetynow' not in bridge_subdomain:
             bridge_subdomain = f"{bridge_subdomain}-safetynow"
-        
-        # Redirect directly to Bridge learner courses page
-        # Bridge will detect external auth configured and trigger OIDC flow automatically
-        # This bypasses the /login endpoint which has 503 issues
-        # We rely on session data (ohs_account_id, ohs_unique_id) stored above
-        # The session should persist across the redirect to Bridge
-        bridge_url = f"https://{bridge_subdomain}.bridgeapp.com/learner/courses"
+
+        # Redirect to Bridge; SSO triggers OIDC. Default landing: learner catalog.
+        # Author course path is stored for /openid/authorize final redirect (session + PendingOIDCLogin).
+        landing_path = _vpath if _vpath else '/learner/courses'
+        bridge_url = f"https://{bridge_subdomain}.bridgeapp.com{landing_path}"
         
         return HttpResponseRedirect(bridge_url)
         
