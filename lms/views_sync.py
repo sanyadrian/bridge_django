@@ -84,6 +84,14 @@ def generate_subaccount_domain(company_name, prefix='ohsi', root_subdomain='safe
     return f"{prefix}-{domain}-{root_subdomain}"
 
 
+def bridge_subaccount_url(bridge_subaccount_id):
+    """Full Bridge LMS URL for a subaccount subdomain."""
+    subdomain = (bridge_subaccount_id or '').strip().rstrip('/')
+    if not subdomain:
+        return ''
+    return f'https://{subdomain}.bridgeapp.com/'
+
+
 @csrf_exempt
 @require_http_methods(["POST"])
 def sync_user_to_bridge(request):
@@ -330,6 +338,8 @@ def sync_user_to_bridge(request):
                 'error': f'Failed to create/update Bridge user: {str(e)}'
             }, status=500)
         
+        subaccount_unique_url = bridge_subaccount_url(bridge_subaccount_id)
+
         # Create or update OHSAccount in Django (using email as unique_id)
         if account:
             # Update existing account
@@ -337,6 +347,8 @@ def sync_user_to_bridge(request):
             account.first_name = first_name
             account.last_name = last_name
             account.bridge_subaccount_id = bridge_subaccount_id
+            if subaccount_unique_url:
+                account.unique_url = subaccount_unique_url
             if company_name:
                 account.company_name = company_name
             if bridge_user:
@@ -353,6 +365,7 @@ def sync_user_to_bridge(request):
                 last_name=last_name,
                 company_name=company_name,
                 bridge_subaccount_id=bridge_subaccount_id,
+                unique_url=subaccount_unique_url,
                 bridge_user_id=bridge_user.get('id') if bridge_user else None,
                 bridge_account_id=subaccount.get('id') if subaccount else None,
                 prefix=prefix if prefix in ['ohsi', 'hri', 'ilt'] else None,
@@ -516,6 +529,7 @@ def sync_user_to_bridge(request):
             'data': {
                 'email': email,
                 'bridge_subaccount_id': bridge_subaccount_id,
+                'unique_url': subaccount_unique_url,
                 'bridge_user_id': bridge_user.get('id') if bridge_user else None,
                 'subaccount_created': subaccount_created,
                 'user_created': user_created,
@@ -788,6 +802,7 @@ def create_bridge_subaccount(request):
         
         # Step 11: Create OHSAccount record EARLY so SSO login works while courses are being shared
         logger.info("Step 11: Creating/updating OHSAccount record (before course sharing)...")
+        subaccount_unique_url = bridge_subaccount_url(subaccount_subdomain)
         try:
             account, created = OHSAccount.objects.get_or_create(
                 unique_id=email,
@@ -796,6 +811,7 @@ def create_bridge_subaccount(request):
                     'first_name': first_name,
                     'last_name': last_name,
                     'bridge_subaccount_id': subaccount_subdomain,
+                    'unique_url': subaccount_unique_url,
                     'company_name': company_name,
                     'is_active': True,
                     'bridge_user_id': bridge_user.get('id') if bridge_user else None,
@@ -811,6 +827,8 @@ def create_bridge_subaccount(request):
                 account.first_name = first_name
                 account.last_name = last_name
                 account.bridge_subaccount_id = subaccount_subdomain
+                if subaccount_unique_url:
+                    account.unique_url = subaccount_unique_url
                 account.company_name = company_name
                 account.is_active = True
                 if bridge_user:
